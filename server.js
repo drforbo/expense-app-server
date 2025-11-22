@@ -199,6 +199,84 @@ Respond with ONLY valid JSON (no markdown, no explanations):
 }`;
 }
 
+// NEW: Generate personalized onboarding guide
+app.post('/api/generate-guide', async (req, res) => {
+  try {
+    const {
+      workType,
+      timeCommitment,
+      monthlyIncome,
+      receivesGiftedItems,
+      hasInternationalIncome,
+      trackingGoal,
+    } = req.body;
+
+    console.log('📝 Generating personalized guide for:', workType);
+
+    // Validate required fields
+    if (!workType || !timeCommitment || monthlyIncome === undefined) {
+      return res.status(400).json({ 
+        error: 'Missing required fields' 
+      });
+    }
+
+    const incomeRange = 
+      monthlyIncome < 500 ? 'under £500'
+      : monthlyIncome < 2000 ? '£500-£2,000'
+      : monthlyIncome < 5000 ? '£2,000-£5,000'
+      : 'over £5,000';
+
+    const prompt = `You are a UK tax advisor helping a content creator understand their tax obligations. Based on their profile, give them a personalized quick guide.
+
+USER PROFILE:
+- Work: ${workType}
+- Time commitment: ${timeCommitment}
+- Monthly income: ${incomeRange} (roughly £${monthlyIncome})
+- Receives gifted items: ${receivesGiftedItems ? 'Yes' : 'No'}
+- International income: ${hasInternationalIncome ? 'Yes' : 'No'}
+- Main goal: ${trackingGoal}
+
+Create a concise, friendly guide with 3-4 key points they need to know right now. Focus on:
+1. Their specific tax situation (self-employment, VAT threshold if relevant)
+2. What expenses they can claim (especially gifted items if applicable)
+3. International income implications if applicable
+4. One actionable next step
+
+Write in plain English, be encouraging, and keep it under 200 words. Use bullet points for clarity. Don't use jargon - explain terms simply.`;
+
+    const message = await anthropic.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 500,
+      messages: [
+        {
+          role: 'user',
+          content: prompt,
+        },
+      ],
+    });
+
+    const guide = message.content[0].text;
+
+    console.log('✅ Guide generated successfully');
+    res.json({ guide });
+  } catch (error) {
+    console.error('❌ Error generating guide:', error);
+    
+    // Send fallback guide
+    const fallbackGuide = `Based on your profile, here's what you need to know:
+
+• As a ${req.body.workType}, you'll need to register for Self Assessment with HMRC if you earn over £1,000/year.
+
+• You can claim expenses for items you buy for your content - equipment, products, travel, and more. Keep all receipts!
+
+${req.body.receivesGiftedItems ? '• Gifted items count as income! Track their value - HMRC considers them "payment in kind" and they\'re taxable.\n\n' : ''}${req.body.hasInternationalIncome ? '• International income needs special attention - you may need to declare it differently and watch for double taxation.\n\n' : ''}• Start tracking everything now. The earlier you build the habit, the easier tax season will be.
+
+Ready to get started? Let's make tax simple.`;
+    
+    res.json({ guide: fallbackGuide });
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
