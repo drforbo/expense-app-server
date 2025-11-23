@@ -18,6 +18,7 @@
     "expo": "^54.0.23",
     "express": "^5.1.0",
     "plaid": "^39.1.0",
+    "react-native-markdown-display": "^7.0.2",
     "react-native-plaid-link-sdk": "^12.7.0"
   },
   "devDependencies": {
