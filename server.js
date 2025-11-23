@@ -211,7 +211,7 @@ app.post('/api/generate-guide', async (req, res) => {
       trackingGoal,
     } = req.body;
 
-    console.log('📝 Generating personalized guide for:', workType);
+    console.log('📝 Generating guide - Structure:', trackingGoal, 'International:', hasInternationalIncome);
 
     // Validate required fields
     if (!workType || !timeCommitment || monthlyIncome === undefined) {
@@ -226,27 +226,66 @@ app.post('/api/generate-guide', async (req, res) => {
       : monthlyIncome < 5000 ? '£2,000-£5,000'
       : 'over £5,000';
 
-    const prompt = `You are a UK tax advisor helping a content creator understand their tax obligations. Based on their profile, give them a personalized quick guide.
+    // Map trackingGoal to clear business structure
+    const businessStructure = 
+      trackingGoal === 'compliance' ? 'sole_trader'
+      : trackingGoal === 'deductions' ? 'limited_company'
+      : 'not_registered';
 
-USER PROFILE:
-- Work: ${workType}
+    console.log('📋 Mapped business structure:', businessStructure);
+
+    const prompt = `You are a UK tax advisor. Generate a personalized tax guide for a content creator.
+
+USER DATA:
+- Work type: ${workType}
 - Time commitment: ${timeCommitment}
-- Monthly income: ${incomeRange} (roughly £${monthlyIncome})
-- Receives gifted items: ${receivesGiftedItems ? 'Yes' : 'No'}
-- International income: ${hasInternationalIncome ? 'Yes' : 'No'}
-- Main goal: ${trackingGoal}
+- Monthly income: ${incomeRange} (£${monthlyIncome})
+- Receives gifted items: ${receivesGiftedItems}
+- Has international income: ${hasInternationalIncome}
+- Business structure: ${businessStructure}
 
-Create a concise, friendly guide with 3-4 key points they need to know right now. Focus on:
-1. Their specific tax situation (self-employment, VAT threshold if relevant)
-2. What expenses they can claim (especially gifted items if applicable)
-3. International income implications if applicable
-4. One actionable next step
+MANDATORY RULES - YOU MUST FOLLOW THESE EXACTLY:
 
-Write in plain English, be encouraging, and keep it under 200 words. Use bullet points for clarity. Don't use jargon - explain terms simply.`;
+1. TAX OBLIGATIONS SECTION (## Your Tax Status):
+   
+   IF business_structure = "limited_company":
+   - MUST say: "As a limited company director, you have TWO separate tax obligations:"
+   - MUST explain: Company files Corporation Tax (CT600) - usually due 9 months after year-end
+   - MUST explain: You personally file Self Assessment as a director
+   - DO NOT tell them to "register" - they already are registered
+   
+   IF business_structure = "sole_trader":
+   - MUST say: "You're registered as a sole trader"
+   - MUST explain: File annual Self Assessment returns
+   - MUST explain: Pay Income Tax and National Insurance on profits
+   - DO NOT tell them to "register" - they already are registered
+   
+   IF business_structure = "not_registered":
+   - MUST say: "You need to register with HMRC for Self Assessment"
+   - MUST explain: Required if earning over £1,000/year from self-employment
+   - MUST explain: Deadline is 5th October after your first tax year ends
+
+2. EXPENSES SECTION (## What You Can Claim):
+   - MUST mention: Equipment, software, home office costs, travel for content
+   
+3. IF receivesGiftedItems = true:
+   - MUST include section explaining gifted items count as taxable income at retail value
+   - MUST explain they can often claim them back as business expenses if used for content
+
+4. IF hasInternationalIncome = true:
+   - MUST include section about international income
+   - MUST explain: All worldwide income must be declared to HMRC
+   - MUST mention: Possible relief for foreign taxes to avoid double taxation
+
+5. NEXT STEPS SECTION (## Your Next Step):
+   - Give ONE clear actionable step based on their situation
+
+FORMAT:
+Use markdown headers (##) for sections. Keep total length under 250 words. Be friendly and clear.`;
 
     const message = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 500,
+      max_tokens: 600,
       messages: [
         {
           role: 'user',
@@ -256,23 +295,68 @@ Write in plain English, be encouraging, and keep it under 200 words. Use bullet 
     });
 
     const guide = message.content[0].text;
-
-    console.log('✅ Guide generated successfully');
+    
+    console.log('✅ Guide generated');
+    console.log('📄 Guide preview:', guide.substring(0, 200));
+    
     res.json({ guide });
   } catch (error) {
     console.error('❌ Error generating guide:', error);
     
-    // Send fallback guide
-    const fallbackGuide = `Based on your profile, here's what you need to know:
-
-• As a ${req.body.workType}, you'll need to register for Self Assessment with HMRC if you earn over £1,000/year.
-
-• You can claim expenses for items you buy for your content - equipment, products, travel, and more. Keep all receipts!
-
-${req.body.receivesGiftedItems ? '• Gifted items count as income! Track their value - HMRC considers them "payment in kind" and they\'re taxable.\n\n' : ''}${req.body.hasInternationalIncome ? '• International income needs special attention - you may need to declare it differently and watch for double taxation.\n\n' : ''}• Start tracking everything now. The earlier you build the habit, the easier tax season will be.
-
-Ready to get started? Let's make tax simple.`;
+    // Structured fallback based on business structure
+    const businessStructure = 
+      req.body.trackingGoal === 'compliance' ? 'sole_trader'
+      : req.body.trackingGoal === 'deductions' ? 'limited_company'
+      : 'not_registered';
     
+    let fallbackGuide = `# Your Tax Quick Guide\n\n`;
+    
+    // Tax status section
+    fallbackGuide += `## Your Tax Status\n\n`;
+    
+    if (businessStructure === 'limited_company') {
+      fallbackGuide += `As a limited company director, you have **TWO separate tax obligations**:\n\n`;
+      fallbackGuide += `• **Company**: Files Corporation Tax (CT600) - usually due 9 months after year-end\n`;
+      fallbackGuide += `• **You personally**: File Self Assessment as a director\n\n`;
+    } else if (businessStructure === 'sole_trader') {
+      fallbackGuide += `You're registered as a sole trader:\n\n`;
+      fallbackGuide += `• File annual Self Assessment returns\n`;
+      fallbackGuide += `• Pay Income Tax and National Insurance on profits\n\n`;
+    } else {
+      fallbackGuide += `You need to register with HMRC for Self Assessment:\n\n`;
+      fallbackGuide += `• Required if earning over £1,000/year\n`;
+      fallbackGuide += `• Deadline: 5th October after your first tax year ends\n\n`;
+    }
+    
+    // Expenses section
+    fallbackGuide += `## What You Can Claim\n\n`;
+    fallbackGuide += `• Business expenses: equipment, software, home office costs, travel for content\n`;
+    
+    // Gifted items
+    if (req.body.receivesGiftedItems) {
+      fallbackGuide += `• **Gifted items**: Count as income at retail value, BUT you can often claim them back as business expenses if used for content\n`;
+    }
+    
+    fallbackGuide += `\n`;
+    
+    // International income
+    if (req.body.hasInternationalIncome) {
+      fallbackGuide += `## International Income\n\n`;
+      fallbackGuide += `• All worldwide income must be declared to HMRC\n`;
+      fallbackGuide += `• You might get relief for foreign taxes paid to avoid double taxation\n\n`;
+    }
+    
+    // Next steps
+    fallbackGuide += `## Your Next Step\n\n`;
+    if (businessStructure === 'not_registered') {
+      fallbackGuide += `Register with HMRC as self-employed immediately. Set aside 25-30% of income for tax and start tracking expenses now.\n\n`;
+    } else {
+      fallbackGuide += `Start tracking ALL expenses now. Proper records from the start will save you headaches at tax time.\n\n`;
+    }
+    
+    fallbackGuide += `You've got this!`;
+    
+    console.log('📋 Using fallback guide for:', businessStructure);
     res.json({ guide: fallbackGuide });
   }
 });
