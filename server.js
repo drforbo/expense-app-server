@@ -34,7 +34,7 @@ app.post('/api/create_link_token', async (req, res) => {
     
     const response = await plaidClient.linkTokenCreate({
       user: { client_user_id: userId },
-      client_name: 'Bopp',
+      client_name: 'bopp',
       products: ['transactions'],
       country_codes: ['GB'],
       language: 'en',
@@ -243,14 +243,14 @@ app.post('/api/generate-guide', async (req, res) => {
       guide += `You've got a limited company! That means:\n\n`;
       guide += `**Your company** pays Corporation Tax on profits\n\n`;
       guide += `**You personally** file Self Assessment on salary/dividends\n\n`;
-      guide += `Don't worry - Bopp helps you track everything you need for your personal side.\n\n`;
+      guide += `Don't worry - bopp helps you track everything you need for your personal side.\n\n`;
     } else if (businessStructure === 'sole_trader') {
       guide += `As a sole trader, you file **one tax return** each year.\n\n`;
       guide += `Deadline: 31st January\n\n`;
     } else {
       guide += `**First things first:** Register with HMRC for Self Assessment\n\n`;
       guide += `You need this if you earn over £1,000/year\n\n`;
-      guide += `Once registered, Bopp will help you track everything!\n\n`;
+      guide += `Once registered, bopp will help you track everything!\n\n`;
     }
 
     guide += `## 💰 What You Can Claim\n\n`;
@@ -277,11 +277,11 @@ app.post('/api/generate-guide', async (req, res) => {
     
     if (businessStructure === 'not_registered') {
       guide += `1. Register at gov.uk/register-for-self-assessment\n\n`;
-      guide += `2. Connect your bank to Bopp\n\n`;
+      guide += `2. Connect your bank to bopp\n\n`;
       guide += `3. Let us do the heavy lifting!\n\n`;
     } else {
       guide += `Connect your bank and start tracking.\n\n`;
-      guide += `Bopp will categorize everything and keep you organized.\n\n`;
+      guide += `bopp will categorize everything and keep you organized.\n\n`;
     }
 
     guide += `💡 **Pro tip:** Set aside 25-30% of income for tax\n\n`;
