@@ -137,7 +137,7 @@ app.post('/api/sync_transactions', async (req, res) => {
           name: 'Boots',
           merchant_name: 'Boots',
           amount: 24.99,
-          date: new Date(today.setDate(today.getDate() - 2)).toISOString().split('T')[0],
+          date: new Date(today.getTime() - 2 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
           category: ['Shops', 'Health and Beauty']
         },
         {
@@ -145,7 +145,7 @@ app.post('/api/sync_transactions', async (req, res) => {
           name: 'Tesco',
           merchant_name: 'Tesco',
           amount: 45.20,
-          date: new Date(today.setDate(today.getDate() - 5)).toISOString().split('T')[0],
+          date: new Date(today.getTime() - 5 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
           category: ['Food and Drink', 'Groceries']
         },
         {
@@ -153,7 +153,7 @@ app.post('/api/sync_transactions', async (req, res) => {
           name: 'Amazon',
           merchant_name: 'Amazon',
           amount: 89.99,
-          date: new Date(today.setDate(today.getDate() - 7)).toISOString().split('T')[0],
+          date: new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
           category: ['Shops', 'Digital Purchase']
         },
         {
@@ -161,7 +161,7 @@ app.post('/api/sync_transactions', async (req, res) => {
           name: 'Starbucks',
           merchant_name: 'Starbucks',
           amount: 4.50,
-          date: new Date(today.setDate(today.getDate() - 1)).toISOString().split('T')[0],
+          date: new Date(today.getTime() - 1 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
           category: ['Food and Drink', 'Restaurants', 'Coffee Shop']
         },
         {
@@ -169,7 +169,7 @@ app.post('/api/sync_transactions', async (req, res) => {
           name: 'Shell',
           merchant_name: 'Shell',
           amount: 52.00,
-          date: new Date(today.setDate(today.getDate() - 3)).toISOString().split('T')[0],
+          date: new Date(today.getTime() - 3 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
           category: ['Travel', 'Gas Stations']
         },
         {
@@ -177,13 +177,85 @@ app.post('/api/sync_transactions', async (req, res) => {
           name: 'Currys',
           merchant_name: 'Currys',
           amount: 299.99,
-          date: new Date(today.setDate(today.getDate() - 10)).toISOString().split('T')[0],
+          date: new Date(today.getTime() - 10 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
           category: ['Shops', 'Electronics']
+        },
+        {
+          transaction_id: 'mock-7',
+          name: 'Sainsburys',
+          merchant_name: 'Sainsburys',
+          amount: 38.45,
+          date: new Date(today.getTime() - 4 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+          category: ['Food and Drink', 'Groceries']
+        },
+        {
+          transaction_id: 'mock-8',
+          name: 'Adobe Creative Cloud',
+          merchant_name: 'Adobe',
+          amount: 54.99,
+          date: new Date(today.getTime() - 6 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+          category: ['Service', 'Subscription']
+        },
+        {
+          transaction_id: 'mock-9',
+          name: 'Pret A Manger',
+          merchant_name: 'Pret A Manger',
+          amount: 8.75,
+          date: new Date(today.getTime() - 1 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+          category: ['Food and Drink', 'Restaurants']
+        },
+        {
+          transaction_id: 'mock-10',
+          name: 'Uber',
+          merchant_name: 'Uber',
+          amount: 15.20,
+          date: new Date(today.getTime() - 3 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+          category: ['Travel', 'Taxi']
+        },
+        {
+          transaction_id: 'mock-11',
+          name: 'Apple Store',
+          merchant_name: 'Apple',
+          amount: 129.00,
+          date: new Date(today.getTime() - 8 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+          category: ['Shops', 'Electronics']
+        },
+        {
+          transaction_id: 'mock-12',
+          name: 'Waterstones',
+          merchant_name: 'Waterstones',
+          amount: 22.99,
+          date: new Date(today.getTime() - 9 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+          category: ['Shops', 'Bookstores']
+        },
+        {
+          transaction_id: 'mock-13',
+          name: 'Costa Coffee',
+          merchant_name: 'Costa',
+          amount: 5.20,
+          date: new Date(today.getTime() - 2 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+          category: ['Food and Drink', 'Coffee Shop']
+        },
+        {
+          transaction_id: 'mock-14',
+          name: 'Argos',
+          merchant_name: 'Argos',
+          amount: 67.50,
+          date: new Date(today.getTime() - 11 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+          category: ['Shops', 'General Merchandise']
+        },
+        {
+          transaction_id: 'mock-15',
+          name: 'EE Mobile',
+          merchant_name: 'EE',
+          amount: 35.00,
+          date: new Date(today.getTime() - 12 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+          category: ['Service', 'Mobile Phone']
         }
       ];
 
       allTransactions = mockTransactions;
-      console.log('✅ Using 6 mock transactions');
+      console.log('✅ Using 15 mock transactions');
     } else {
       // Use real Plaid data
       console.log('🔄 Fetching real Plaid transactions...');
@@ -224,7 +296,7 @@ app.post('/api/sync_transactions', async (req, res) => {
             name: 'Boots',
             merchant_name: 'Boots',
             amount: 24.99,
-            date: new Date(today.setDate(today.getDate() - 2)).toISOString().split('T')[0],
+            date: new Date(today.getTime() - 2 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
             category: ['Shops', 'Health and Beauty']
           },
           {
@@ -232,7 +304,7 @@ app.post('/api/sync_transactions', async (req, res) => {
             name: 'Tesco',
             merchant_name: 'Tesco',
             amount: 45.20,
-            date: new Date(today.setDate(today.getDate() - 5)).toISOString().split('T')[0],
+            date: new Date(today.getTime() - 5 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
             category: ['Food and Drink', 'Groceries']
           },
           {
@@ -240,7 +312,7 @@ app.post('/api/sync_transactions', async (req, res) => {
             name: 'Amazon',
             merchant_name: 'Amazon',
             amount: 89.99,
-            date: new Date(today.setDate(today.getDate() - 7)).toISOString().split('T')[0],
+            date: new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
             category: ['Shops', 'Digital Purchase']
           },
           {
@@ -248,7 +320,7 @@ app.post('/api/sync_transactions', async (req, res) => {
             name: 'Starbucks',
             merchant_name: 'Starbucks',
             amount: 4.50,
-            date: new Date(today.setDate(today.getDate() - 1)).toISOString().split('T')[0],
+            date: new Date(today.getTime() - 1 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
             category: ['Food and Drink', 'Restaurants', 'Coffee Shop']
           },
           {
@@ -256,7 +328,7 @@ app.post('/api/sync_transactions', async (req, res) => {
             name: 'Shell',
             merchant_name: 'Shell',
             amount: 52.00,
-            date: new Date(today.setDate(today.getDate() - 3)).toISOString().split('T')[0],
+            date: new Date(today.getTime() - 3 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
             category: ['Travel', 'Gas Stations']
           },
           {
@@ -264,13 +336,85 @@ app.post('/api/sync_transactions', async (req, res) => {
             name: 'Currys',
             merchant_name: 'Currys',
             amount: 299.99,
-            date: new Date(today.setDate(today.getDate() - 10)).toISOString().split('T')[0],
+            date: new Date(today.getTime() - 10 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
             category: ['Shops', 'Electronics']
+          },
+          {
+            transaction_id: 'mock-7',
+            name: 'Sainsburys',
+            merchant_name: 'Sainsburys',
+            amount: 38.45,
+            date: new Date(today.getTime() - 4 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+            category: ['Food and Drink', 'Groceries']
+          },
+          {
+            transaction_id: 'mock-8',
+            name: 'Adobe Creative Cloud',
+            merchant_name: 'Adobe',
+            amount: 54.99,
+            date: new Date(today.getTime() - 6 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+            category: ['Service', 'Subscription']
+          },
+          {
+            transaction_id: 'mock-9',
+            name: 'Pret A Manger',
+            merchant_name: 'Pret A Manger',
+            amount: 8.75,
+            date: new Date(today.getTime() - 1 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+            category: ['Food and Drink', 'Restaurants']
+          },
+          {
+            transaction_id: 'mock-10',
+            name: 'Uber',
+            merchant_name: 'Uber',
+            amount: 15.20,
+            date: new Date(today.getTime() - 3 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+            category: ['Travel', 'Taxi']
+          },
+          {
+            transaction_id: 'mock-11',
+            name: 'Apple Store',
+            merchant_name: 'Apple',
+            amount: 129.00,
+            date: new Date(today.getTime() - 8 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+            category: ['Shops', 'Electronics']
+          },
+          {
+            transaction_id: 'mock-12',
+            name: 'Waterstones',
+            merchant_name: 'Waterstones',
+            amount: 22.99,
+            date: new Date(today.getTime() - 9 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+            category: ['Shops', 'Bookstores']
+          },
+          {
+            transaction_id: 'mock-13',
+            name: 'Costa Coffee',
+            merchant_name: 'Costa',
+            amount: 5.20,
+            date: new Date(today.getTime() - 2 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+            category: ['Food and Drink', 'Coffee Shop']
+          },
+          {
+            transaction_id: 'mock-14',
+            name: 'Argos',
+            merchant_name: 'Argos',
+            amount: 67.50,
+            date: new Date(today.getTime() - 11 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+            category: ['Shops', 'General Merchandise']
+          },
+          {
+            transaction_id: 'mock-15',
+            name: 'EE Mobile',
+            merchant_name: 'EE',
+            amount: 35.00,
+            date: new Date(today.getTime() - 12 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+            category: ['Service', 'Mobile Phone']
           }
         ];
 
         allTransactions = mockTransactions;
-        console.log('✅ Using 6 mock transactions');
+        console.log('✅ Using 15 mock transactions');
       }
     }
 
@@ -328,71 +472,92 @@ TRANSACTION:
 PREVIOUS ANSWER TO Q1 ("What did you buy?"):
 ${JSON.stringify(previousAnswers, null, 2)}
 
-YOUR GOAL: Generate Q2 based on whether Q1 was a SINGLE PRODUCT or MULTIPLE PRODUCTS.
+YOUR GOAL: Detect if Q1 is SINGLE ITEM or MULTIPLE ITEMS, then generate appropriate Q2.
 
-STEP 1: Analyze Q1 answer - is it single or multiple products?
+STEP 1: Analyze Q1 answer - is it single or multiple?
 
-SINGLE PRODUCT examples:
-- "Foundation", "Makeup", "Laptop", "Camera", "Phone", "Bike", "Coffee", "Ring light"
-- Specific named items
+SINGLE ITEM indicators:
+- Specific product names: "Laptop", "Foundation", "Camera", "Coffee", "Ring light"
+- Singular items: "A bike", "Phone", "Sandwich"
+- Specific equipment/supplies
 
-MULTIPLE PRODUCTS examples:
-- "Weekly food shop", "Big shop", "Groceries", "Various items", "Shopping", "Multiple things"
-- Any answer suggesting they bought MANY different items in one trip
+MULTIPLE ITEMS indicators:
+- Shopping language: "Weekly food shop", "Big shop", "Shopping", "Groceries"
+- Plural/multiple: "Multiple items", "Various things", "Several products", "Mix of..."
+- Generic: "Household essentials", "Weekly shop (multiple items)"
 
-STEP 2: Generate Q2 based on type:
+STEP 2: Generate Q2 based on detection:
 
-IF SINGLE PRODUCT:
-Q2: "What is this [item] for?"
-- Ask about the specific item's purpose
-- Include HMRC-accurate scenarios
-- Make it personal AND business options
+IF SINGLE ITEM:
+Q2: "What will you use this [item] for?" OR "What is this [item] for?"
+- Reference the specific item from Q1
+- Include 4 options with HMRC-accurate scenarios
+- Mix of personal AND business options
 
-Example - Q1="Foundation":
+Example - Q1 answer: "Foundation"
 Q2: "What is this foundation for?"
 - "To review or feature in a video" (100% business)
-- "To wear for work events/filming" (personal - HMRC says personal grooming)
+- "To wear for work events/filming" (personal - HMRC: personal grooming)
 - "Everyday personal use" (personal)
 - "As props for set dressing" (100% business)
 
-Example - Q1="Laptop":
+Example - Q1 answer: "Laptop"
 Q2: "What will you use this laptop for?"
 - "Personal use and entertainment" (personal)
-- "Exclusively for editing videos/content" (100% business)
-- "Work and some personal use" (100% business if bought for business)
+- "Editing videos/content for my channel" (100% business)
+- "Work and personal use" (100% business - bought for business)
 - "Running my business" (100% business)
 
-IF MULTIPLE PRODUCTS (shopping trip):
-Q2: Ask if ANY were for their business (use friendly, personalized language based on work type)
+IF MULTIPLE ITEMS:
+Q2: Ask if ANY were for business (personalized to work type)
 
-For content_creation: "Did you buy anything you'll review, feature, or use in your content?"
-For freelancing: "Did you buy anything you'll use for client work or projects?"
-For side_hustle: "Did you buy anything for your side hustle?"
-For general: "Did you buy anything for your business?"
-
-Options (ALWAYS THE SAME 3):
-- "No, all personal"
-- "Yes - all for my [content/business/projects]"
-- "Yes - some items were"
-
-Example - Q1="Weekly food shop":
-Q2: "Did you buy anything you'll review, feature, or use in your content?"
+Work type: content_creation
+Q2: "Did any of this include items for your content?"
 - "No, all personal"
 - "Yes - all for my content"
-- "Yes - some items were"
+- "Yes - some items were for content"
+
+Work type: freelancing
+Q2: "Did any of this include items for client work or projects?"
+- "No, all personal"
+- "Yes - all for my work"
+- "Yes - some items were for work"
+
+Work type: side_hustle
+Q2: "Did any of this include items for your side hustle?"
+- "No, all personal"
+- "Yes - all for my side hustle"
+- "Yes - some items were for my side hustle"
+
+Work type: (other)
+Q2: "Did any of this include items for your business?"
+- "No, all personal"
+- "Yes - all for my business"
+- "Yes - some items were for business"
 
 IMPORTANT:
-- Detect if it's single vs multiple from their Q1 answer
-- For single items: ask about purpose/use
-- For multiple items: ask if ANY were for business (friendly language)
-- Make it easy to admit personal
+- Analyze the Q1 answer text to detect single vs multiple
+- Use friendly, personalized language based on ${workTypeDesc}
+- Always return exactly ONE question
 
-Respond with ONLY valid JSON:
+CRITICAL: Respond with ONLY valid JSON. No text before or after. Start with { and end with }.
+
 {
   "questions": [
     {
       "text": "Contextual Q2 referencing the item from Q1",
       "options": ["personal scenario", "business scenario", "another option", "fourth option"]
+    }
+  ]
+}
+
+OR if asking text input question:
+
+{
+  "questions": [
+    {
+      "text": "What did you buy for your content and approximately how much did those items cost in total?",
+      "options": []
     }
   ]
 }`
@@ -413,27 +578,35 @@ TRANSACTION:
 PREVIOUS ANSWERS:
 ${JSON.stringify(previousAnswers, null, 2)}
 
+NUMBER OF ANSWERS: ${numAnswered}
+
 YOUR GOAL: Check if we have enough info to categorize. ALMOST NEVER ask follow-up questions.
 
-Ask a follow-up in these 2 cases ONLY:
+CRITICAL: If we already have 3 or more answers, STOP. Return empty questions array [] - we have enough info!
+
+Ask a follow-up in these 2 cases ONLY (and only if we have fewer than 3 answers):
 
 1. VEHICLE/MILEAGE TRACKING:
-   If they said VEHICLE for business use:
+   If they said VEHICLE for business use AND we've only asked 2 questions so far:
    - "Delivery work", "Business travel", "Courier work", "Bike for deliveries"
    → Ask ONCE about mileage tracking (important for HMRC)
 
-2. MIXED SHOPPING - "Yes - some items were":
-   If they answered "Yes - some items were" to the multiple products question
-   → Ask ONE TEXT INPUT QUESTION (no options):
+   But if we already asked the mileage question (3 answers), DO NOT ask again!
+
+2. MIXED SHOPPING - CRITICAL - "some items":
+   If Q2 answer contains ANY of: "some items", "some things", "Yes - some", "some of"
+   → MUST ask ONE TEXT INPUT QUESTION (no options):
 
    For content_creation: "What did you buy for your content and approximately how much did those items cost in total?"
-   For freelancing: "What did you buy for client work/projects and approximately how much did those items cost in total?"
+   For freelancing: "What did you buy for your work and approximately how much did those items cost in total?"
    For side_hustle: "What did you buy for your side hustle and approximately how much did those items cost in total?"
    For general: "What did you buy for your business and approximately how much did those items cost in total?"
 
-   Options: [] (empty - user types freely)
+   Options: [] (empty array - user will type freely)
 
    Example user input: "Foundation for filming and ring light - about £45 total"
+
+   IMPORTANT: If they said "some items" you MUST ask this question. DO NOT proceed to categorization without getting the details and cost.
 
 3. ALL OTHER CASES:
    → Return empty questions array [] - we have enough info!
@@ -442,6 +615,8 @@ Ask a follow-up in these 2 cases ONLY:
    - "No, all personal" → Categorize as personal
    - "Yes - all for my content" → Categorize as 100% business
    - Single product answered → Categorize based on purpose
+   - Already have 3 answers → ALWAYS stop, proceed to categorization
+   - Mileage question already answered → Proceed to categorization
 
 HANDLE AUTOMATICALLY (no questions):
 - Home office: Use HMRC simplified expenses (£6/week for working from home)
@@ -459,7 +634,7 @@ EXAMPLES - NO FOLLOW-UP NEEDED:
 EXAMPLES - FOLLOW-UP NEEDED:
 
 Mixed shopping with "some items":
-- Q1="Weekly food shop" Q2="Did you buy anything you'll review/feature in your content?" A="Yes - some items were"
+- Q1="Weekly food shop" Q2="Did any of this include items for your content?" A="Yes - some items were for content"
   → ASK Q3 (text input, no options): "What did you buy for your content and approximately how much did those items cost in total?"
   User types: "Foundation for filming and ring light - about £45 total"
 
@@ -481,14 +656,14 @@ RESPONSE RULES:
 
 EXAMPLES:
 
-Previous: Q1="Weekly food shop" Q2="Did you buy anything you'll review/feature in your content?" A="Yes - some items were"
+Previous: Q1="Weekly food shop" Q2="Did any of this include items for your content?" A="Yes - some items were for content"
 Next question (text input): "What did you buy for your content and approximately how much did those items cost in total?"
 Options: [] (empty - user types freely)
 
-Previous: Q1="Weekly food shop" Q2="Did you buy anything you'll review/feature in your content?" A="No, all personal"
+Previous: Q1="Weekly food shop" Q2="Did any of this include items for your content?" A="No, all personal"
 Next question: [] (empty - proceed to categorization as 100% personal)
 
-Previous: Q1="Weekly food shop" Q2="Did you buy anything you'll review/feature in your content?" A="Yes - all for my content"
+Previous: Q1="Weekly food shop" Q2="Did any of this include items for your content?" A="Yes - all for my content"
 Next question: [] (empty - proceed to categorization as 100% business)
 
 Previous: Q1="Bike" Q2="Delivery/business travel"
@@ -507,17 +682,29 @@ Next question: NONE - Bought with business intent = 100% business
 Previous: Q1="Camera" Q2="Creating content"
 Next question: NONE - 100% business
 
-Respond with ONLY valid JSON with exactly 1 question (or empty array if no more questions needed):
+CRITICAL: Respond with ONLY valid JSON. No text before or after. Start with { and end with }.
+
+If asking text input question (e.g., for "some items"):
 {
   "questions": [
     {
-      "text": "Follow-up question based on analysis above",
-      "options": ["option 1", "option 2", "option 3", "option 4"]
+      "text": "What did you buy for your content and approximately how much did those items cost in total?",
+      "options": []
     }
   ]
 }
 
-OR if no more questions needed:
+If asking options question (e.g., mileage):
+{
+  "questions": [
+    {
+      "text": "Do you track your business mileage?",
+      "options": ["Yes, I keep a mileage log", "No, but I can estimate", "I use it for all my deliveries", "I don't track it"]
+    }
+  ]
+}
+
+If no more questions needed:
 {
   "questions": []
 }`)
@@ -535,137 +722,64 @@ TRANSACTION:
 - Date: ${transaction.date}
 - Plaid Category: ${transaction.category?.join(', ') || 'Unknown'}
 
-YOUR GOAL: Generate 2 questions to categorize this expense.
+YOUR GOAL: Generate Q1 ONLY - ask what they bought.
 
-QUESTION 1 (ALWAYS): "What did you buy?"
-- Generate 4 SPECIFIC product/item suggestions based on:
-  * The merchant name
-  * The transaction amount
-  * The user's work type (${workTypeDesc})
+QUESTION 1: "What did you buy?"
+- Generate 4 SPECIFIC suggestions based on:
+  * The merchant name (${transaction.merchant_name || transaction.name})
+  * The transaction amount (£${Math.abs(transaction.amount)})
   * What this merchant typically sells
-  * Include BOTH personal AND business-relevant items
-
-QUESTION 2: Ask about business intent/purpose - BE SPECIFIC AND CONTEXTUAL
-- Question 2 should be contextual to what they likely bought
-- Include SPECIFIC scenarios with HMRC-accurate tax treatment
-- Include realistic personal AND business options
-- Make it easy to admit something is personal
-- Clarify when something "feels" work-related but is actually personal under HMRC rules
+  * Include BOTH specific items AND general shopping options
+  * Include BOTH personal AND business-relevant items for a ${workTypeDesc}
 
 EXAMPLES:
 
-Boots (£25) - Makeup/Foundation:
+Boots (£25):
 Q1: "What did you buy?"
 - "Makeup/foundation"
 - "Skincare products"
-- "Hair products"
+- "Weekly shop (multiple items)"
 - "Health/pharmacy items"
-
-Q2: "What was the makeup/foundation for?"
-- "To review or feature in a video" (business - 100%)
-- "To wear for work events/filming" (personal - HMRC says this is still personal grooming)
-- "Everyday personal use"
-- "As props for set dressing"
 
 Starbucks (£4.50):
 Q1: "What did you buy?"
-- "Coffee/drink to go"
-- "Coffee + pastry"
-- "Lunch meeting (food + drinks)"
-- "Just a drink"
+- "Coffee/drink"
+- "Coffee + food"
+- "Multiple drinks/snacks"
+- "Meeting with food/drinks"
 
-Q2: "What was this for?"
-- "Quick coffee on my own" (personal)
-- "Catching up with a friend" (personal)
-- "Business meeting/client discussion" (50% deductible)
-- "Working session (needed wifi/space)" (50% deductible)
-
-Amazon (£90) - Camera Equipment:
-Q1: "What did you buy?"
-- "Camera equipment/accessories"
-- "Electronics/gadgets"
-- "Software/digital product"
-- "Books/courses"
-
-Q2: "What will you use the camera equipment for?"
-- "Personal photos/memories" (personal)
-- "Filming content for my channel" (business - 100%)
-- "Both personal and content" (requires split)
-- "Upgrading my setup for better videos" (business - 100%)
-
-Currys (£300) - Laptop:
+Currys (£300):
 Q1: "What did you buy?"
 - "Laptop/computer"
 - "Camera/video equipment"
 - "Phone/tablet"
-- "TV/monitor"
+- "Multiple items/accessories"
 
-Q2: "What will you use the laptop for?"
-- "Personal use and entertainment" (personal)
-- "Exclusively for editing videos/content" (business - 100%)
-- "Work and some personal use" (requires split)
-- "Running my business" (business - 100%)
-
-Tesco (£45) - Ingredients:
+Tesco (£45):
 Q1: "What did you buy?"
 - "Weekly food shop"
 - "Specific ingredients"
-- "Snacks/drinks"
 - "Household essentials"
-
-Q2: "What were these ingredients for?"
-- "Regular weekly groceries" (personal)
-- "Recipe for a cooking video" (business - 100%)
-- "To feature/review in content" (business - 100%)
-- "Party/personal cooking" (personal)
-
-Bike Shop (£400):
-Q1: "What did you buy?"
-- "Bicycle"
-- "Bike accessories/parts"
-- "Safety gear"
-- "Maintenance/repair"
-
-Q2: "What will you use the bike for?"
-- "Commuting to work/office" (personal - NOT deductible)
-- "Personal exercise/leisure" (personal)
-- "Delivery/courier work" (business - 100%)
-- "Filming cycling content/reviews" (business - 100%)
+- "Mix of groceries/other items"
 
 IMPORTANT RULES:
-- Question 1 MUST be "What did you buy?" with specific product options
-- Question 2 MUST be contextual to what they likely bought from Question 1
-- Question 2 should reference the product type (e.g., "What was the makeup for?" not "What was this for?")
-- Include at least 2 personal options in Question 2
-- Include HMRC-accurate scenarios (e.g., "To wear for work events" is PERSONAL grooming, not business)
-- Make options specific and realistic, not vague like "personal use"
-- Consider what a ${workTypeDesc} might buy from this merchant
-- User can type their own answer if none fit
+- Always include at least one "multiple items" or "shopping" option
+- Include specific single item suggestions
+- Make suggestions specific to what this merchant sells
+- Include BOTH personal AND business-relevant options
 
-HMRC REMINDERS FOR QUESTION 2:
-- Makeup/clothing to WEAR for work = Personal (even if content creation)
-- Makeup/items to REVIEW or FEATURE in content = Business
-- Commuting = ALWAYS personal (NOT deductible)
-- Business travel/delivery = Business
-- Meeting friends (even if discussing work) = Personal
-- Formal business meeting = Business (50% for meals)
-
-Respond with ONLY valid JSON:
+Respond with ONLY valid JSON with ONE question:
 {
   "questions": [
     {
       "text": "What did you buy?",
-      "options": ["specific item 1", "specific item 2", "specific item 3", "specific item 4"]
-    },
-    {
-      "text": "Contextual question referencing what they bought (e.g., 'What was the [item] for?')",
-      "options": ["specific personal scenario", "specific business scenario", "another realistic option", "fourth option"]
+      "options": ["specific option 1", "specific option 2", "multiple items option", "specific option 4"]
     }
   ]
 }`;
 
     const message = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
+      model: "claude-3-5-haiku-20241022", // Use Haiku for faster question generation
       max_tokens: 1000,
       messages: [{ role: "user", content: prompt }]
     });
@@ -764,12 +878,15 @@ HMRC TAX RULES YOU MUST APPLY:
    - If purchased WITH INTENT for business = 100% deductible
    - Intent at time of purchase is what matters
    - If bought for work but some used personally after = STILL 100% business expense
+   - Equipment bought for business (even if sometimes personal use) = 100% deductible
 
 2. **When to Claim 100% Business:**
+   - Equipment bought for work: Laptop, phone, camera, etc. = 100% supplies (even if "sometimes" personal)
    - Content creator buys makeup FOR a specific video → 100% supplies
    - Freelancer buys equipment FOR client project → 100% supplies
    - Props, materials specifically for content → 100% supplies
    - Software/subscriptions used for business → 100% software
+   - CRITICAL: If user says "for work", "for business", "sometimes for work" = 100% business
 
 3. **NOT Deductible (Personal):**
    - Commuting to permanent workplace (even if work-related!)
@@ -787,7 +904,11 @@ HMRC TAX RULES YOU MUST APPLY:
 4. **When Splitting is REQUIRED by HMRC:**
    - Home office: Must calculate % of home used for business
    - Vehicle: Track business miles vs total miles
-   - Phone contract: If genuinely mixed personal/business use
+   - Phone/internet CONTRACTS (ongoing): If genuinely mixed use, track % business use
+
+**When Splitting is NOT allowed:**
+   - Equipment purchases (laptop, phone, camera, etc.) - these are 100% if bought for business
+   - One-time equipment = 100% business (don't split)
 
 5. **Special Rules:**
    - Business meals: Max 50% deductible (HMRC rule)
@@ -796,10 +917,19 @@ HMRC TAX RULES YOU MUST APPLY:
 
 DECISION PROCESS:
 1. Read the user's answer carefully - what did they actually say?
-2. Did they indicate clear business intent? (for work/content/client/specific project) → 100% business
-3. Did they say it's for commuting or personal use? → 0% personal
-4. Is it a dual-use item by nature? (home, car, phone) → Consider split
-5. When uncertain, be conservative - don't assume business use
+2. FIRST: Determine if this is CAPITAL EQUIPMENT or ONGOING EXPENSE:
+   - Capital equipment (one-time): Phone device, laptop, camera, desk, software license
+   - Ongoing expense (recurring): Phone bill, internet bill, utilities, subscriptions
+   - Clues: Amount (£200+ = likely device), Merchant (Apple Store = device, EE Mobile = bill), Plaid category
+3. For CAPITAL EQUIPMENT:
+   - If used for business (even "sometimes") → 100% business
+   - Keywords: "for work", "sometimes for work", "use for business" = 100%
+4. For ONGOING EXPENSES:
+   - If "sometimes for work" → ask for % or estimate split
+   - If "mostly for work" → 70-80% business
+   - If "all for work" → 100% business
+5. Did they say it's for commuting or purely personal? → 0% personal
+6. When uncertain, be conservative - don't assume business use
 
 EXAMPLES OF INTERPRETATION:
 
@@ -832,12 +962,26 @@ MILEAGE CASES:
   Q: "Do you track mileage?" A: "I don't track it"
   → businessPercent: 100, categoryId: "mileage", explanation: "Business travel - IMPORTANT: Start tracking mileage (HMRC requires records)"
 
-EQUIPMENT CASES (100% BUSINESS):
-- Q: "Laptop" A: "For work and some personal use"
-  → businessPercent: 100, categoryId: "supplies", explanation: "Purchased with business intent - 100% deductible under HMRC 'wholly and exclusively' rule"
+EQUIPMENT PURCHASES (100% BUSINESS):
+- Transaction: Apple Store £500, Q: "Phone" A: "Sometimes for work, sometimes personal"
+  → businessPercent: 100, categoryId: "supplies", explanation: "Phone device for business - 100% deductible under capital allowances"
 
-- Q: "Camera" A: "To film content"
+- Transaction: Currys £800, Q: "Laptop" A: "For work and some personal use"
+  → businessPercent: 100, categoryId: "supplies", explanation: "Laptop for business - 100% deductible under HMRC 'wholly and exclusively' rule"
+
+- Transaction: Amazon £200, Q: "Camera" A: "To film content"
   → businessPercent: 100, categoryId: "supplies", explanation: "Business equipment for content creation"
+
+ONGOING BILLS (SPLIT BY USAGE):
+- Transaction: EE Mobile £35, Q: "Phone bill" A: "Sometimes for work"
+  → businessPercent: 50, categoryId: "supplies", explanation: "Phone contract - 50% business use estimate"
+
+- Transaction: Sky Broadband £40, Q: "Internet" A: "Use for work"
+  → businessPercent: 100, categoryId: "home_office", explanation: "Internet for business - 100% deductible"
+
+CRITICAL:
+- DEVICE PURCHASES (capital) = 100% if used for business
+- MONTHLY BILLS (ongoing) = split by actual usage %
 
 MIXED SHOPPING CASES:
 
@@ -917,7 +1061,7 @@ FOR MIXED SHOPPING TRIPS:
 - Personal amount = total transaction - business amount
 - Each split must have: amount, categoryId, categoryName, businessPercent, explanation, taxDeductible, description
 
-Respond with ONLY valid JSON:
+CRITICAL: Respond with ONLY valid JSON. No explanatory text. No commentary. Just pure JSON starting with { and ending with }.
 
 FOR SINGLE-PURPOSE TRANSACTIONS:
 {
@@ -1126,6 +1270,136 @@ Respond with ONLY valid JSON:
   } catch (error) {
     console.error('❌ Error in bulk categorization:', error);
     res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Re-categorize transaction based on user feedback
+app.post('/api/recategorize_with_feedback', async (req, res) => {
+  try {
+    const { transaction, answers, userProfile, currentCategorization, feedback } = req.body;
+    console.log('🔄 Re-categorizing with feedback:', transaction.name);
+    console.log('💬 User feedback:', feedback);
+    console.log('📊 Current categorization:', currentCategorization);
+
+    const workTypeDesc = userProfile?.work_type === 'content_creation' ? 'content creator'
+      : userProfile?.work_type === 'freelancing' ? 'freelancer'
+      : userProfile?.work_type === 'side_hustle' ? 'side hustler'
+      : userProfile?.custom_work_type || 'self-employed';
+
+    const categories = `
+- supplies: Office supplies, materials, equipment, props for content
+- software: Business software, tools, subscriptions, apps
+- marketing: Advertising, promotions, social media ads, brand materials
+- meals: Business meals and client entertainment (50% deductible per HMRC)
+- mileage: Business travel (45p/mile for first 10k miles, then 25p/mile)
+- home_office: Rent, utilities, internet for home workspace (requires proportional calculation)
+- professional_services: Accountant, lawyer, consultant fees
+- training: Courses, books, professional development
+- insurance: Business insurance premiums
+- personal: Non-business expense (not deductible)`;
+
+    const prompt = `You are a UK tax expert helping a ${workTypeDesc} categorize expenses under HMRC rules.
+
+USER PROFILE:
+- Work type: ${workTypeDesc}
+- Monthly income: £${userProfile?.monthly_income || 'unknown'}
+- Tracking goal: ${userProfile?.tracking_goal || 'unknown'}
+
+TRANSACTION:
+- Merchant: ${transaction.merchant_name || transaction.name}
+- Amount: £${Math.abs(transaction.amount)}
+- Date: ${transaction.date}
+
+USER'S ORIGINAL ANSWERS:
+${JSON.stringify(answers, null, 2)}
+
+CURRENT CATEGORIZATION (what we showed them):
+${JSON.stringify(currentCategorization, null, 2)}
+
+USER'S FEEDBACK (what they said is wrong):
+"${feedback}"
+
+YOUR TASK: Re-categorize this transaction based on the user's feedback.
+
+AVAILABLE CATEGORIES:
+${categories}
+
+INSTRUCTIONS:
+1. Read the user's feedback carefully
+2. Understand what they think should change
+3. Apply HMRC rules correctly based on their correction
+4. Return a NEW categorization that addresses their concerns
+
+Common feedback patterns:
+- "This should be 100% business" → Change to businessPercent: 100, taxDeductible: true
+- "This is personal" → Change to businessPercent: 0, categoryId: "personal", taxDeductible: false
+- "Wrong category" → Change categoryId and categoryName to match their description
+- "Should be split" → Create a split transaction if they describe business vs personal portions
+- "Percentage is wrong" → Adjust businessPercent to match what they indicate
+
+HMRC RULES:
+1. "Wholly and exclusively" rule - if bought WITH INTENT for business = 100% deductible
+2. Business meals: Max 50% deductible
+3. Commuting to permanent workplace: NOT deductible (even if work-related)
+4. Equipment bought for business: 100% deductible even if some personal use
+
+Be responsive to their feedback while ensuring HMRC compliance.
+
+CRITICAL: Respond with ONLY valid JSON. No explanatory text. No commentary. Just pure JSON starting with { and ending with }.
+
+FOR SINGLE-PURPOSE TRANSACTIONS:
+{
+  "categoryId": "one of the category IDs above",
+  "categoryName": "friendly display name",
+  "businessPercent": 0-100 (exact number based on feedback),
+  "explanation": "Updated explanation acknowledging their feedback",
+  "taxDeductible": true or false
+}
+
+FOR SPLIT TRANSACTIONS (if feedback indicates splitting):
+{
+  "isSplit": true,
+  "splits": [
+    {
+      "amount": business_amount_in_pounds,
+      "categoryId": "supplies or appropriate category",
+      "categoryName": "Business Supplies",
+      "businessPercent": 100,
+      "explanation": "What the business items were",
+      "taxDeductible": true,
+      "description": "Short description of business items"
+    },
+    {
+      "amount": remaining_amount,
+      "categoryId": "personal",
+      "categoryName": "Personal",
+      "businessPercent": 0,
+      "explanation": "Personal portion",
+      "taxDeductible": false,
+      "description": "Personal items"
+    }
+  ]
+}`;
+
+    const message = await anthropic.messages.create({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 1500,
+      messages: [{ role: "user", content: prompt }]
+    });
+
+    let responseText = message.content[0].text;
+    console.log('🤖 AI Response:', responseText);
+
+    // Strip markdown code blocks if present
+    responseText = responseText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+
+    const newCategorization = JSON.parse(responseText);
+
+    console.log('✅ Re-categorized as:', newCategorization.categoryId || 'split', `(${newCategorization.businessPercent || 'split'}%)`);
+    res.json(newCategorization);
+  } catch (error) {
+    console.error('❌ Error re-categorizing with feedback:', error);
+    res.status(500).json({ error: error.message });
   }
 });
 
