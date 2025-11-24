@@ -132,130 +132,173 @@ app.post('/api/sync_transactions', async (req, res) => {
 
       const today = new Date();
       const mockTransactions = [
+        // EXPENSES
         {
-          transaction_id: 'mock-1',
-          name: 'Boots',
-          merchant_name: 'Boots',
-          amount: 24.99,
-          date: new Date(today.getTime() - 2 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-          category: ['Shops', 'Health and Beauty']
-        },
-        {
-          transaction_id: 'mock-2',
-          name: 'Tesco',
-          merchant_name: 'Tesco',
-          amount: 45.20,
-          date: new Date(today.getTime() - 5 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-          category: ['Food and Drink', 'Groceries']
-        },
-        {
-          transaction_id: 'mock-3',
-          name: 'Amazon',
-          merchant_name: 'Amazon',
-          amount: 89.99,
-          date: new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-          category: ['Shops', 'Digital Purchase']
-        },
-        {
-          transaction_id: 'mock-4',
-          name: 'Starbucks',
-          merchant_name: 'Starbucks',
-          amount: 4.50,
+          transaction_id: 'mock-exp-1',
+          name: 'Canon Camera Store',
+          merchant_name: 'Canon UK',
+          amount: 1299.00,
           date: new Date(today.getTime() - 1 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-          category: ['Food and Drink', 'Restaurants', 'Coffee Shop']
-        },
-        {
-          transaction_id: 'mock-5',
-          name: 'Shell',
-          merchant_name: 'Shell',
-          amount: 52.00,
-          date: new Date(today.getTime() - 3 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-          category: ['Travel', 'Gas Stations']
-        },
-        {
-          transaction_id: 'mock-6',
-          name: 'Currys',
-          merchant_name: 'Currys',
-          amount: 299.99,
-          date: new Date(today.getTime() - 10 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
           category: ['Shops', 'Electronics']
         },
         {
-          transaction_id: 'mock-7',
-          name: 'Sainsburys',
-          merchant_name: 'Sainsburys',
-          amount: 38.45,
-          date: new Date(today.getTime() - 4 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-          category: ['Food and Drink', 'Groceries']
+          transaction_id: 'mock-exp-2',
+          name: 'Ring Light Pro',
+          merchant_name: 'Amazon',
+          amount: 79.99,
+          date: new Date(today.getTime() - 2 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+          category: ['Shops', 'Electronics']
         },
         {
-          transaction_id: 'mock-8',
-          name: 'Adobe Creative Cloud',
-          merchant_name: 'Adobe',
-          amount: 54.99,
-          date: new Date(today.getTime() - 6 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-          category: ['Service', 'Subscription']
+          transaction_id: 'mock-exp-3',
+          name: 'Notion Pro',
+          merchant_name: 'Notion Labs',
+          amount: 8.00,
+          date: new Date(today.getTime() - 3 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+          category: ['Service', 'Software Subscription']
         },
         {
-          transaction_id: 'mock-9',
-          name: 'Pret A Manger',
-          merchant_name: 'Pret A Manger',
-          amount: 8.75,
+          transaction_id: 'mock-exp-4',
+          name: 'Leon Restaurant',
+          merchant_name: 'Leon',
+          amount: 15.50,
           date: new Date(today.getTime() - 1 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
           category: ['Food and Drink', 'Restaurants']
         },
         {
-          transaction_id: 'mock-10',
-          name: 'Uber',
-          merchant_name: 'Uber',
-          amount: 15.20,
-          date: new Date(today.getTime() - 3 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-          category: ['Travel', 'Taxi']
+          transaction_id: 'mock-exp-5',
+          name: 'Deliveroo Order',
+          merchant_name: 'Deliveroo',
+          amount: 28.90,
+          date: new Date(today.getTime() - 4 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+          category: ['Food and Drink', 'Food Delivery']
         },
         {
-          transaction_id: 'mock-11',
-          name: 'Apple Store',
-          merchant_name: 'Apple',
+          transaction_id: 'mock-exp-6',
+          name: 'BP Petrol',
+          merchant_name: 'BP',
+          amount: 45.20,
+          date: new Date(today.getTime() - 2 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+          category: ['Travel', 'Gas Stations']
+        },
+        {
+          transaction_id: 'mock-exp-7',
+          name: 'WeWork Hot Desk',
+          merchant_name: 'WeWork',
+          amount: 35.00,
+          date: new Date(today.getTime() - 5 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+          category: ['Service', 'Workspace']
+        },
+        {
+          transaction_id: 'mock-exp-8',
+          name: 'Udemy Course',
+          merchant_name: 'Udemy',
+          amount: 89.99,
+          date: new Date(today.getTime() - 6 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+          category: ['Service', 'Education']
+        },
+        {
+          transaction_id: 'mock-exp-9',
+          name: 'Microphone USB',
+          merchant_name: 'Scan Computers',
           amount: 129.00,
-          date: new Date(today.getTime() - 8 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+          date: new Date(today.getTime() - 3 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
           category: ['Shops', 'Electronics']
         },
         {
-          transaction_id: 'mock-12',
-          name: 'Waterstones',
-          merchant_name: 'Waterstones',
-          amount: 22.99,
-          date: new Date(today.getTime() - 9 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-          category: ['Shops', 'Bookstores']
+          transaction_id: 'mock-exp-10',
+          name: 'Instagram Ads',
+          merchant_name: 'Meta Platforms',
+          amount: 250.00,
+          date: new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+          category: ['Service', 'Advertising']
         },
         {
-          transaction_id: 'mock-13',
-          name: 'Costa Coffee',
-          merchant_name: 'Costa',
-          amount: 5.20,
-          date: new Date(today.getTime() - 2 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-          category: ['Food and Drink', 'Coffee Shop']
+          transaction_id: 'mock-exp-11',
+          name: 'Stationery',
+          merchant_name: 'Ryman',
+          amount: 22.40,
+          date: new Date(today.getTime() - 4 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+          category: ['Shops', 'Office Supplies']
         },
         {
-          transaction_id: 'mock-14',
-          name: 'Argos',
-          merchant_name: 'Argos',
+          transaction_id: 'mock-exp-12',
+          name: 'Canva Pro',
+          merchant_name: 'Canva',
+          amount: 10.99,
+          date: new Date(today.getTime() - 5 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+          category: ['Service', 'Software Subscription']
+        },
+        {
+          transaction_id: 'mock-exp-13',
+          name: 'Train Ticket',
+          merchant_name: 'Trainline',
           amount: 67.50,
-          date: new Date(today.getTime() - 11 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-          category: ['Shops', 'General Merchandise']
+          date: new Date(today.getTime() - 8 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+          category: ['Travel', 'Public Transport']
         },
         {
-          transaction_id: 'mock-15',
-          name: 'EE Mobile',
-          merchant_name: 'EE',
-          amount: 35.00,
-          date: new Date(today.getTime() - 12 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-          category: ['Service', 'Mobile Phone']
+          transaction_id: 'mock-exp-14',
+          name: 'Accountant Fee',
+          merchant_name: 'Smith & Co Accounting',
+          amount: 300.00,
+          date: new Date(today.getTime() - 9 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+          category: ['Service', 'Professional Services']
+        },
+        {
+          transaction_id: 'mock-exp-15',
+          name: 'Zara',
+          merchant_name: 'Zara',
+          amount: 89.99,
+          date: new Date(today.getTime() - 2 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+          category: ['Shops', 'Clothing']
+        },
+
+        // INCOME TRANSACTIONS (negative amounts = credits in Plaid)
+        {
+          transaction_id: 'mock-income-1',
+          name: 'TikTok Creator Fund',
+          merchant_name: 'TikTok Ltd',
+          amount: -320.50,
+          date: new Date(today.getTime() - 2 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+          category: ['Transfer', 'Deposit']
+        },
+        {
+          transaction_id: 'mock-income-2',
+          name: 'Sponsorship Deal',
+          merchant_name: 'GlowUp Beauty',
+          amount: -2500.00,
+          date: new Date(today.getTime() - 5 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+          category: ['Transfer', 'Deposit']
+        },
+        {
+          transaction_id: 'mock-income-3',
+          name: 'Freelance Project',
+          merchant_name: 'Digital Agency Ltd',
+          amount: -1750.00,
+          date: new Date(today.getTime() - 3 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+          category: ['Transfer', 'Deposit']
+        },
+        {
+          transaction_id: 'mock-income-4',
+          name: 'Affiliate Payout',
+          merchant_name: 'Amazon Associates',
+          amount: -187.30,
+          date: new Date(today.getTime() - 6 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+          category: ['Transfer', 'Deposit']
+        },
+        {
+          transaction_id: 'mock-income-5',
+          name: 'Bank Transfer',
+          merchant_name: 'Sarah Johnson',
+          amount: -50.00,
+          date: new Date(today.getTime() - 1 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+          category: ['Transfer', 'Deposit']
         }
       ];
 
       allTransactions = mockTransactions;
-      console.log('✅ Using 15 mock transactions');
+      console.log('✅ Using 20 mock transactions (15 expenses + 5 income)');
     } else {
       // Use real Plaid data
       console.log('🔄 Fetching real Plaid transactions...');
@@ -449,10 +492,287 @@ app.post('/api/generate_questions', async (req, res) => {
       : userProfile?.work_type === 'side_hustle' ? 'side hustler'
       : userProfile?.custom_work_type || 'self-employed';
 
+    // Check if this is income (positive amount) or expense (negative amount)
+    const isIncome = transaction.amount < 0; // Plaid uses negative for income credits
+    console.log(`💰 Transaction type: ${isIncome ? 'INCOME' : 'EXPENSE'}`);
+
     // Check how many questions have been answered
     const numAnswered = Object.keys(previousAnswers).length;
     const hasPreviousAnswers = numAnswered > 0;
 
+    // INCOME FLOW - Different questions for income categorization
+    if (isIncome) {
+      // CRITICAL: Check for personal income keywords in Q1 answer BEFORE calling AI
+      if (numAnswered === 1) {
+        const q1Answer = Object.values(previousAnswers)[0]?.toLowerCase() || '';
+        const personalKeywords = [
+          'friend', 'family', 'paying me back', 'paying back', 'paid me back',
+          'reimbursement', 'reimburse', 'gift', 'personal transfer', 'personal',
+          'dinner', 'lunch', 'expense', 'borrowed', 'owe', 'owed', 'repay',
+          'repaying', 'split', 'share', 'shared'
+        ];
+
+        const isPersonalIncome = personalKeywords.some(keyword => q1Answer.includes(keyword));
+
+        if (isPersonalIncome) {
+          console.log('🏠 Personal income detected in Q1:', q1Answer);
+          console.log('✅ Skipping Q2 - ready to categorize as personal income');
+          res.json({ questions: [] });
+          return;
+        }
+      }
+
+      // CRITICAL: If we have 2 answers for business income, we're done
+      if (numAnswered >= 2) {
+        console.log('✅ Income: 2 questions answered, ready to categorize');
+        res.json({ questions: [] });
+        return;
+      }
+
+      const incomePrompt = hasPreviousAnswers
+        ? `You are a UK tax assistant helping a ${workTypeDesc} categorize income.
+
+USER PROFILE:
+- Work type: ${workTypeDesc}
+- Monthly income: £${userProfile?.monthly_income || 'unknown'}
+- Has international income: ${userProfile?.has_international_income ? 'Yes' : 'No'}
+
+TRANSACTION (INCOME):
+- Merchant/Payer: ${transaction.merchant_name || transaction.name}
+- Amount: £${Math.abs(transaction.amount)}
+- Date: ${transaction.date}
+- Plaid Category: ${transaction.category?.join(', ') || 'Unknown'}
+
+PREVIOUS ANSWERS:
+${JSON.stringify(previousAnswers, null, 2)}
+
+NUMBER OF ANSWERS: ${numAnswered}
+
+YOUR GOAL: Check if we need more questions or can categorize.
+
+STEP 1: Check Q1 answer - is this PERSONAL or BUSINESS income?
+
+PERSONAL INCOME indicators (stop asking questions):
+- "Friend/family paying me back"
+- "Personal transfer"
+- "Gift"
+- "Reimbursement"
+- "Friend paying me back for dinner"
+- Any mention of friends, family, personal, gift, paying back
+
+If Q1 indicates PERSONAL → Return empty questions [] (ready to categorize as personal)
+
+BUSINESS INCOME (ask Q2):
+- Only ask Q2 if Q1 indicated business income (sponsorship, client, platform revenue, etc.)
+- Q2: "What type of income is this?" with business categories
+
+STEP 2: If Q1 was business income and we have 2 answers:
+- Return empty questions [] (ready to categorize)
+
+If Q2 answer was "Other income" → Ask ONE more question:
+{
+  "questions": [
+    {
+      "text": "Can you briefly describe what this income was for?",
+      "options": []
+    }
+  ]
+}
+
+CRITICAL: Respond with ONLY valid JSON. No text before or after.
+
+If personal income detected OR we have enough business income info:
+{
+  "questions": []
+}
+
+If Q1 was business income and we need Q2:
+{
+  "questions": [
+    {
+      "text": "What type of income is this?",
+      "options": ["Based on work type - see Q2 examples"]
+    }
+  ]
+}`
+        : (numAnswered === 1
+          ? `You are a UK tax assistant helping a ${workTypeDesc} categorize income.
+
+USER PROFILE:
+- Work type: ${workTypeDesc}
+- Monthly income: £${userProfile?.monthly_income || 'unknown'}
+- Has international income: ${userProfile?.has_international_income ? 'Yes' : 'No'}
+
+TRANSACTION (INCOME):
+- Merchant/Payer: ${transaction.merchant_name || transaction.name}
+- Amount: £${Math.abs(transaction.amount)}
+- Date: ${transaction.date}
+
+ANSWER TO Q1 ("What is this income for?"):
+${JSON.stringify(previousAnswers, null, 2)}
+
+YOUR GOAL: Check if Q1 indicates PERSONAL or BUSINESS income.
+
+STEP 1: Analyze the Q1 answer carefully.
+
+PERSONAL INCOME indicators (stop asking questions - return empty array):
+- Contains words: "friend", "family", "paying me back", "paying back", "reimbursement", "reimburse"
+- Contains words: "gift", "personal transfer", "personal", "dinner", "lunch", "expense"
+- Contains words: "borrowed", "owe", "owed", "repay", "repaying"
+- Describes a non-business personal transaction
+
+BUSINESS INCOME indicators (ask Q2):
+- Client payments, sponsorships, brand deals
+- Platform revenue (YouTube, TikTok, etc.)
+- Sales, commissions, fees
+- Any work-related income
+
+STEP 2: Decide what to return.
+
+If PERSONAL INCOME detected in Q1:
+{
+  "questions": []
+}
+
+If BUSINESS INCOME detected in Q1:
+{
+  "questions": [
+    {
+      "text": "What type of income is this?",
+      "options": [/* business options based on work type */]
+    }
+  ]
+}
+
+QUESTION 2 OPTIONS (only if business income):
+
+For content_creation:
+- "Sponsorship or brand deal"
+- "Ad revenue (YouTube, TikTok, etc.)"
+- "Affiliate commissions"
+- "Client work or consulting"
+- "Product or merchandise sales"
+- "Other income"
+
+For freelancing:
+- "Client fees or project payment"
+- "Retainer or ongoing contract"
+- "Commission or referral fee"
+- "Consulting or advisory work"
+- "Product or service sales"
+- "Other income"
+
+For side_hustle or general:
+- "Sales or revenue"
+- "Client payment"
+- "Commission or referral fee"
+- "Service fees"
+- "Product sales"
+- "Other income"
+
+CRITICAL:
+1. Check Q1 answer for personal income keywords FIRST
+2. Respond with ONLY valid JSON
+3. Return empty questions [] if personal income detected`
+          : `You are a UK tax assistant helping a ${workTypeDesc} categorize income.
+
+USER PROFILE:
+- Work type: ${workTypeDesc}
+- Monthly income: £${userProfile?.monthly_income || 'unknown'}
+- Has international income: ${userProfile?.has_international_income ? 'Yes' : 'No'}
+
+TRANSACTION (INCOME):
+- Merchant/Payer: ${transaction.merchant_name || transaction.name}
+- Amount: £${Math.abs(transaction.amount)}
+- Date: ${transaction.date}
+- Plaid Category: ${transaction.category?.join(', ') || 'Unknown'}
+
+YOUR GOAL: Generate Q1 ONLY - ask what this income is for.
+
+QUESTION 1: "What is this income for?"
+- Generate 4-5 SPECIFIC suggestions based on:
+  * The merchant/payer name (${transaction.merchant_name || transaction.name})
+  * The transaction amount (£${Math.abs(transaction.amount)})
+  * What this ${workTypeDesc} typically receives income from
+  * Include BOTH business AND personal income options
+
+EXAMPLES:
+
+For content_creation work type:
+
+YouTube payment (£500):
+Q1: "What is this income for?"
+- "YouTube/Google ad revenue"
+- "Brand sponsorship payment"
+- "Friend/family paying me back"
+- "Gift or personal transfer"
+
+Brand Studio Ltd (£1200):
+Q1: "What is this income for?"
+- "Brand partnership/sponsorship"
+- "Client project payment"
+- "Friend paying me back for dinner/expense"
+- "Personal transfer"
+
+Unknown transfer (£50):
+Q1: "What is this income for?"
+- "Friend/family reimbursement"
+- "Gift or personal money"
+- "Affiliate commission"
+- "Small client payment"
+
+For freelancing work type:
+
+Bank transfer (£2000):
+Q1: "What is this income for?"
+- "Client project payment"
+- "Retainer or ongoing contract"
+- "Friend/family transfer"
+- "Personal reimbursement"
+
+PayPal payment (£500):
+Q1: "What is this income for?"
+- "Client invoice payment"
+- "Freelance platform payment"
+- "Personal transfer from friend/family"
+- "Gift"
+
+IMPORTANT RULES:
+- Make suggestions specific to the payer name and amount
+- ALWAYS include personal/non-business options like:
+  * "Friend/family paying me back"
+  * "Personal transfer"
+  * "Gift"
+  * "Reimbursement"
+- Include common business income for ${workTypeDesc}
+- Provide exactly 4 options
+
+Respond with ONLY valid JSON:
+{
+  "questions": [
+    {
+      "text": "What is this income for?",
+      "options": ["specific option 1", "specific option 2", "personal option", "another option"]
+    }
+  ]
+}`);
+
+      const message = await anthropic.messages.create({
+        model: "claude-3-5-haiku-20241022",
+        max_tokens: 1000,
+        messages: [{ role: "user", content: incomePrompt }]
+      });
+
+      let responseText = message.content[0].text;
+      responseText = responseText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+      const questions = JSON.parse(responseText);
+
+      console.log('✅ Generated', questions.questions.length, 'income questions');
+      res.json(questions);
+      return;
+    }
+
+    // EXPENSE FLOW - Original flow for expenses
     const prompt = hasPreviousAnswers
       ? (numAnswered === 1
         ? `You are a UK tax assistant helping a ${workTypeDesc} categorize expenses.
@@ -812,7 +1132,10 @@ app.post('/api/categorize_from_answers', async (req, res) => {
       : userProfile?.work_type === 'side_hustle' ? 'side hustler'
       : userProfile?.custom_work_type || 'self-employed';
 
-    const categories = `
+    // Check if this is income or expense
+    const isIncome = transaction.amount < 0; // Plaid uses negative for income credits
+
+    const expenseCategories = `
 - supplies: Office supplies, materials, equipment, props for content
 - software: Business software, tools, subscriptions, apps
 - marketing: Advertising, promotions, social media ads, brand materials
@@ -823,6 +1146,168 @@ app.post('/api/categorize_from_answers', async (req, res) => {
 - training: Courses, books, professional development
 - insurance: Business insurance premiums
 - personal: Non-business expense (not deductible)`;
+
+    const incomeCategories = `
+- sponsorship_income: Sponsorships, brand deals, partnerships
+- ad_revenue: YouTube, TikTok, Instagram ad revenue
+- affiliate_income: Affiliate commissions, referral income
+- client_fees: Client work, consulting, freelance projects
+- sales_income: Product sales, merchandise, digital products
+- other_income: Other business income`;
+
+    // INCOME CATEGORIZATION
+    if (isIncome) {
+      const incomePrompt = `You are a UK tax expert helping a ${workTypeDesc} categorize business income under HMRC rules.
+
+USER PROFILE:
+- Work type: ${workTypeDesc}
+- Monthly income: £${userProfile?.monthly_income || 'unknown'}
+- Has international income: ${userProfile?.has_international_income ? 'Yes' : 'No'}
+
+TRANSACTION (INCOME):
+- Payer: ${transaction.merchant_name || transaction.name}
+- Amount: £${Math.abs(transaction.amount)}
+- Date: ${transaction.date}
+
+USER'S ANSWERS TO YOUR QUESTIONS:
+${JSON.stringify(answers, null, 2)}
+
+AVAILABLE INCOME CATEGORIES:
+${incomeCategories}
+
+HMRC TAX RULES FOR INCOME:
+
+1. **Distinguish Business Income from Personal Transfers**
+
+   PERSONAL INCOME (NOT taxable - friends/family/gifts):
+   - Friend or family paying you back for expenses
+   - Personal gifts
+   - Reimbursements from friends
+   - Personal transfers
+   → businessPercent: 0, taxDeductible: false, categoryId: "personal"
+
+   BUSINESS INCOME (taxable):
+   - Client payments, sponsorships, platform revenue, sales
+   - Anything earned through self-employment
+   → businessPercent: 100, taxDeductible: true, use appropriate business category
+
+2. **Income Categories for Self Assessment:**
+   - Sponsorships/brand deals → sponsorship_income
+   - Ad revenue from platforms → ad_revenue
+   - Affiliate commissions → affiliate_income
+   - Client work/consulting → client_fees
+   - Product/merchandise sales → sales_income
+   - Everything else → other_income
+
+3. **Foreign Income:**
+   - If income is from outside UK, note this in explanation
+   - User must declare foreign income on Self Assessment
+   - May be able to claim Foreign Tax Credit Relief if tax paid abroad
+
+4. **National Insurance:**
+   - Self-employed pay Class 2 NI (if profits over £12,570/year)
+   - And Class 4 NI (9% on profits £12,570-£50,270)
+   - Mention in explanation if this is significant income
+
+DECISION PROCESS:
+1. Read Q1 answer - what is this income for?
+2. Check for PERSONAL INCOME keywords:
+   - "friend", "family", "paying me back", "paying back", "reimbursement"
+   - "gift", "personal transfer", "personal", "dinner", "expense"
+3. If personal keywords found → businessPercent: 0, taxDeductible: false, categoryId: "personal"
+4. If business income → Read Q2 (if exists) and match to business category
+5. Business income → businessPercent: 100, taxDeductible: true
+
+EXAMPLES:
+
+PERSONAL INCOME (NOT taxable):
+Q1: "Friend paying me back for dinner last week"
+→ categoryId: "personal", categoryName: "Personal Income", businessPercent: 0, taxDeductible: false, explanation: "Personal reimbursement from friend - not taxable business income"
+
+Q1: "Friend/family paying me back"
+→ categoryId: "personal", categoryName: "Personal Income", businessPercent: 0, taxDeductible: false, explanation: "Personal transfer - not business income"
+
+Q1: "Gift or personal transfer"
+→ categoryId: "personal", categoryName: "Personal Income", businessPercent: 0, taxDeductible: false, explanation: "Personal gift - not taxable"
+
+Q1: "Personal reimbursement"
+→ categoryId: "personal", categoryName: "Personal Income", businessPercent: 0, taxDeductible: false, explanation: "Personal reimbursement - not business income"
+
+BUSINESS INCOME (taxable):
+Q1: "YouTube/Google ad revenue" Q2: "Ad revenue (YouTube, TikTok, etc.)"
+→ categoryId: "ad_revenue", categoryName: "Ad Revenue", businessPercent: 100, taxDeductible: true, explanation: "YouTube ad revenue - 100% taxable business income"
+
+Q1: "Brand partnership/sponsorship" Q2: "Sponsorship or brand deal"
+→ categoryId: "sponsorship_income", categoryName: "Sponsorship Income", businessPercent: 100, taxDeductible: true, explanation: "Brand sponsorship - 100% taxable business income"
+
+Q1: "Client project payment" Q2: "Client fees or project payment"
+→ categoryId: "client_fees", categoryName: "Client Fees", businessPercent: 100, taxDeductible: true, explanation: "Client payment - 100% taxable business income"
+
+Q1: "Affiliate commission"
+→ categoryId: "affiliate_income", categoryName: "Affiliate Income", businessPercent: 100, taxDeductible: true, explanation: "Affiliate commission - 100% taxable business income"
+
+OUTPUT REQUIREMENTS:
+
+FOR PERSONAL INCOME (friends, gifts, reimbursements):
+- businessPercent: 0
+- taxDeductible: false
+- categoryId: "personal"
+- categoryName: "Personal Income"
+- Explanation: Mention it's personal/not taxable
+
+FOR BUSINESS INCOME (earned income):
+- businessPercent: 100
+- taxDeductible: true
+- categoryId: appropriate business category (sponsorship_income, ad_revenue, etc.)
+- categoryName: friendly name
+- Explanation: Mention it's taxable business income
+
+CRITICAL VALIDATION:
+1. Did user say "friend", "paying back", "gift", "personal", "reimbursement"?
+   → If YES: businessPercent: 0, taxDeductible: false, categoryId: "personal"
+2. Is this earned business income?
+   → If YES: businessPercent: 100, taxDeductible: true, use business category
+
+CRITICAL: Respond with ONLY valid JSON. No explanatory text. Just pure JSON starting with { and ending with }.
+
+FOR PERSONAL INCOME:
+{
+  "categoryId": "personal",
+  "categoryName": "Personal Income",
+  "businessPercent": 0,
+  "explanation": "Personal transfer/gift/reimbursement - not taxable business income",
+  "taxDeductible": false
+}
+
+FOR BUSINESS INCOME:
+{
+  "categoryId": "one of the business income category IDs",
+  "categoryName": "friendly display name (e.g., Sponsorship Income, Ad Revenue)",
+  "businessPercent": 100,
+  "explanation": "Brief explanation - mention it's taxable business income",
+  "taxDeductible": true,
+  "foreignIncome": true or false (only if from outside UK)
+}`;
+
+      const message = await anthropic.messages.create({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 1000,
+        messages: [{ role: "user", content: incomePrompt }]
+      });
+
+      let responseText = message.content[0].text;
+      console.log('🤖 AI Response:', responseText);
+
+      responseText = responseText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+      const categorization = JSON.parse(responseText);
+
+      console.log('✅ Categorized income as:', categorization.categoryId);
+      res.json(categorization);
+      return;
+    }
+
+    // EXPENSE CATEGORIZATION - Original flow
+    const categories = expenseCategories;
 
     const prompt = `You are a UK tax expert helping a ${workTypeDesc} categorize expenses under HMRC rules.
 
@@ -1394,6 +1879,18 @@ FOR SPLIT TRANSACTIONS (if feedback indicates splitting):
     responseText = responseText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
 
     const newCategorization = JSON.parse(responseText);
+
+    // FIX: For income splits, ensure business income has taxDeductible: true
+    const isIncome = transaction.amount < 0; // Negative = income in Plaid
+    if (isIncome && newCategorization.isSplit && newCategorization.splits) {
+      newCategorization.splits = newCategorization.splits.map(split => ({
+        ...split,
+        // Business income (businessPercent > 0) should be taxDeductible: true
+        // Personal income (businessPercent === 0) should be taxDeductible: false
+        taxDeductible: split.businessPercent > 0
+      }));
+      console.log('✅ Fixed taxDeductible for income splits');
+    }
 
     console.log('✅ Re-categorized as:', newCategorization.categoryId || 'split', `(${newCategorization.businessPercent || 'split'}%)`);
     res.json(newCategorization);
