@@ -121,8 +121,8 @@ app.post('/api/exchange_public_token', async (req, res) => {
 // Sync transactions from Plaid using the Sync API (better for sandbox)
 app.post('/api/sync_transactions', async (req, res) => {
   try {
-    const { access_token, useMockData = true } = req.body;
-    console.log('📊 Syncing transactions...');
+    const { access_token, useMockData = false, user_id } = req.body;
+    console.log('📊 Syncing transactions from Plaid sandbox...');
 
     let allTransactions = [];
 
@@ -300,13 +300,18 @@ app.post('/api/sync_transactions', async (req, res) => {
       allTransactions = mockTransactions;
       console.log('✅ Using 20 mock transactions (15 expenses + 5 income)');
     } else {
-      // Use real Plaid data
-      console.log('🔄 Fetching real Plaid transactions...');
+      // Use real Plaid data - only last 30 days
+      console.log('🔄 Fetching real Plaid transactions (last 30 days)...');
+
+      const thirtyDaysAgo = new Date();
+      thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
       let hasMore = true;
       let cursor = null;
+      let batchCount = 0;
+      const maxBatches = 5; // Limit to prevent infinite loops
 
-      while (hasMore) {
+      while (hasMore && batchCount < maxBatches) {
         const request = {
           access_token: access_token,
         };
@@ -319,14 +324,27 @@ app.post('/api/sync_transactions', async (req, res) => {
 
         const { added, modified, removed, next_cursor, has_more } = response.data;
 
-        allTransactions = allTransactions.concat(added);
+        // Filter to only last 30 days
+        const recentAdded = added.filter(t => {
+          const txDate = new Date(t.date);
+          return txDate >= thirtyDaysAgo;
+        });
+
+        allTransactions = allTransactions.concat(recentAdded);
         hasMore = has_more;
         cursor = next_cursor;
+        batchCount++;
 
-        console.log(`📥 Batch: ${added.length} added, ${modified.length} modified, ${removed.length} removed`);
+        console.log(`📥 Batch ${batchCount}: ${recentAdded.length}/${added.length} recent transactions`);
+
+        // Stop if we've gone past 30 days
+        if (added.length > 0 && added.every(t => new Date(t.date) < thirtyDaysAgo)) {
+          console.log('⏹️  Reached transactions older than 30 days, stopping');
+          break;
+        }
       }
 
-      console.log(`✅ Total found from Plaid: ${allTransactions.length} transactions`);
+      console.log(`✅ Total found from Plaid (last 30 days): ${allTransactions.length} transactions`);
 
       // If sandbox still returns 0 transactions, use mock data as fallback
       if (allTransactions.length === 0) {
@@ -466,9 +484,60 @@ app.post('/api/sync_transactions', async (req, res) => {
       new Date(b.date).getTime() - new Date(a.date).getTime()
     );
 
+    // Filter out already categorized transactions if user_id is provided
+    let finalTransactions = sortedTransactions;
+    if (user_id) {
+      try {
+        console.log('🔍 Filtering out categorized transactions for user:', user_id);
+
+        const { data: categorizedData, error } = await supabaseAdmin
+          .from('categorized_transactions')
+          .select('plaid_transaction_id')
+          .eq('user_id', user_id);
+
+        if (error) {
+          console.error('⚠️  Error fetching categorized transactions:', error);
+        } else {
+          const categorizedIds = new Set(
+            categorizedData?.map(t => t.plaid_transaction_id) || []
+          );
+
+          console.log(`📋 Found ${categorizedIds.size} categorized transaction IDs in Supabase`);
+          if (categorizedIds.size > 0 && categorizedIds.size <= 10) {
+            console.log(`🔍 Categorized IDs:`, Array.from(categorizedIds));
+          }
+
+          // Pre-compute split transaction base IDs for faster lookup
+          const splitTransactionBaseIds = new Set();
+          for (const id of categorizedIds) {
+            if (id.includes('_split_')) {
+              const baseId = id.substring(0, id.indexOf('_split_'));
+              splitTransactionBaseIds.add(baseId);
+            }
+          }
+
+          // Filter uncategorized transactions
+          finalTransactions = sortedTransactions.filter(t => {
+            // Check exact match
+            if (categorizedIds.has(t.transaction_id)) return false;
+
+            // Check if this is a split transaction
+            if (splitTransactionBaseIds.has(t.transaction_id)) return false;
+
+            return true;
+          });
+
+          console.log(`✅ Filtered: ${sortedTransactions.length} total → ${finalTransactions.length} uncategorized`);
+        }
+      } catch (err) {
+        console.error('❌ Error during filtering:', err);
+        // If filtering fails, return all transactions
+      }
+    }
+
     res.json({
-      transactions: sortedTransactions,
-      count: sortedTransactions.length
+      transactions: finalTransactions,
+      count: finalTransactions.length
     });
   } catch (error) {
     console.error('❌ Error syncing transactions:', error.response?.data || error);
@@ -765,7 +834,21 @@ Respond with ONLY valid JSON:
 
       let responseText = message.content[0].text;
       responseText = responseText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-      const questions = JSON.parse(responseText);
+
+      // Try to extract JSON if there's extra text (find first { to last })
+      const firstBrace = responseText.indexOf('{');
+      const lastBrace = responseText.lastIndexOf('}');
+      if (firstBrace !== -1 && lastBrace !== -1 && firstBrace < lastBrace) {
+        responseText = responseText.substring(firstBrace, lastBrace + 1);
+      }
+
+      let questions;
+      try {
+        questions = JSON.parse(responseText);
+      } catch (parseError) {
+        console.error('❌ Failed to parse JSON. Raw response:', responseText);
+        throw parseError;
+      }
 
       console.log('✅ Generated', questions.questions.length, 'income questions');
       res.json(questions);
@@ -1109,7 +1192,20 @@ Respond with ONLY valid JSON with ONE question:
     // Strip markdown code blocks if present
     responseText = responseText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
 
-    const questions = JSON.parse(responseText);
+    // Try to extract JSON if there's extra text (find first { to last })
+    const firstBrace = responseText.indexOf('{');
+    const lastBrace = responseText.lastIndexOf('}');
+    if (firstBrace !== -1 && lastBrace !== -1 && firstBrace < lastBrace) {
+      responseText = responseText.substring(firstBrace, lastBrace + 1);
+    }
+
+    let questions;
+    try {
+      questions = JSON.parse(responseText);
+    } catch (parseError) {
+      console.error('❌ Failed to parse JSON. Raw response:', responseText);
+      throw parseError;
+    }
 
     console.log('✅ Generated', questions.questions.length, 'questions');
     res.json(questions);
@@ -2032,8 +2128,9 @@ app.post('/api/generate-guide', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+const HOST = '0.0.0.0'; // Listen on all network interfaces
+app.listen(PORT, HOST, () => {
+  console.log(`🚀 Server running on http://${HOST}:${PORT}`);
   console.log(`🔧 Plaid environment: ${process.env.PLAID_ENV}`);
   console.log(`🤖 AI categorization: ${process.env.ANTHROPIC_API_KEY ? 'enabled' : 'disabled'}`);
   console.log(`💾 Supabase: ${process.env.SUPABASE_URL ? 'connected' : 'not configured'}`);
