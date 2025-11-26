@@ -828,7 +828,7 @@ Respond with ONLY valid JSON:
 
       const message = await anthropic.messages.create({
         model: "claude-3-5-haiku-20241022",
-        max_tokens: 1000,
+        max_tokens: 500,
         messages: [{ role: "user", content: incomePrompt }]
       });
 
@@ -1183,7 +1183,7 @@ Respond with ONLY valid JSON with ONE question:
 
     const message = await anthropic.messages.create({
       model: "claude-3-5-haiku-20241022", // Use Haiku for faster question generation
-      max_tokens: 1000,
+      max_tokens: 500,
       messages: [{ role: "user", content: prompt }]
     });
 
@@ -1386,8 +1386,8 @@ FOR BUSINESS INCOME:
 }`;
 
       const message = await anthropic.messages.create({
-        model: "claude-sonnet-4-20250514",
-        max_tokens: 1000,
+        model: "claude-3-5-haiku-20241022",
+        max_tokens: 600,
         messages: [{ role: "user", content: incomePrompt }]
       });
 
@@ -1681,8 +1681,8 @@ FOR SPLIT TRANSACTIONS (mixed shopping with business items):
 
 
     const message = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 1500,
+      model: "claude-3-5-haiku-20241022",
+      max_tokens: 800,
       messages: [{ role: "user", content: prompt }]
     });
 
@@ -1784,8 +1784,8 @@ Respond with ONLY valid JSON:
 
         // Call AI to categorize
         const message = await anthropic.messages.create({
-          model: "claude-sonnet-4-20250514",
-          max_tokens: 800,
+          model: "claude-3-5-haiku-20241022",
+          max_tokens: 600,
           messages: [{ role: "user", content: prompt }]
         });
 
@@ -1963,8 +1963,8 @@ FOR SPLIT TRANSACTIONS (if feedback indicates splitting):
 }`;
 
     const message = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 1500,
+      model: "claude-3-5-haiku-20241022",
+      max_tokens: 800,
       messages: [{ role: "user", content: prompt }]
     });
 
