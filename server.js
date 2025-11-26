@@ -1215,6 +1215,125 @@ Respond with ONLY valid JSON with ONE question:
   }
 });
 
+// Bulk generate Q1 for multiple transactions (for pre-loading)
+app.post('/api/bulk_generate_first_questions', async (req, res) => {
+  try {
+    const { transactions, userProfile } = req.body;
+    console.log('⚡ Bulk generating Q1 for', transactions.length, 'transactions');
+
+    const workTypeDesc = userProfile?.work_type === 'content_creation' ? 'content creator'
+      : userProfile?.work_type === 'freelancing' ? 'freelancer'
+      : userProfile?.work_type === 'side_hustle' ? 'side hustler'
+      : userProfile?.custom_work_type || 'self-employed';
+
+    // Generate Q1 for all transactions in parallel
+    const promises = transactions.map(async (transaction) => {
+      const isIncome = transaction.amount < 0;
+
+      const prompt = isIncome
+        ? `You are a UK tax assistant helping a ${workTypeDesc} categorize income.
+
+TRANSACTION (INCOME):
+- Merchant/Payer: ${transaction.merchant_name || transaction.name}
+- Amount: £${Math.abs(transaction.amount)}
+- Date: ${transaction.date}
+
+YOUR GOAL: Generate Q1 ONLY - ask what this income is for.
+
+QUESTION 1: "What is this income for?"
+- Generate 4 SPECIFIC suggestions based on:
+  * The merchant/payer name (${transaction.merchant_name || transaction.name})
+  * The transaction amount (£${Math.abs(transaction.amount)})
+  * What this ${workTypeDesc} typically receives income from
+  * Include BOTH business AND personal income options
+
+IMPORTANT RULES:
+- Make suggestions specific to the payer name and amount
+- ALWAYS include personal/non-business options like:
+  * "Friend/family paying me back"
+  * "Personal transfer"
+  * "Gift"
+  * "Reimbursement"
+- Include common business income for ${workTypeDesc}
+- Provide exactly 4 options
+
+Respond with ONLY valid JSON:
+{
+  "questions": [
+    {
+      "text": "What is this income for?",
+      "options": ["specific option 1", "specific option 2", "personal option", "another option"]
+    }
+  ]
+}`
+        : `You are a UK tax assistant helping a ${workTypeDesc} categorize expenses.
+
+TRANSACTION:
+- Merchant: ${transaction.merchant_name || transaction.name}
+- Amount: £${Math.abs(transaction.amount)}
+- Date: ${transaction.date}
+
+YOUR GOAL: Generate Q1 ONLY - ask what they bought.
+
+QUESTION 1: "What did you buy?"
+- Generate 4 SPECIFIC suggestions based on:
+  * The merchant name (${transaction.merchant_name || transaction.name})
+  * The transaction amount (£${Math.abs(transaction.amount)})
+  * What this merchant typically sells
+  * Include BOTH specific items AND general shopping options
+  * Include BOTH personal AND business-relevant items for a ${workTypeDesc}
+
+Respond with ONLY valid JSON with ONE question:
+{
+  "questions": [
+    {
+      "text": "What did you buy?",
+      "options": ["specific option 1", "specific option 2", "multiple items option", "specific option 4"]
+    }
+  ]
+}`;
+
+      try {
+        const message = await anthropic.messages.create({
+          model: "claude-3-5-haiku-20241022",
+          max_tokens: 400,
+          messages: [{ role: "user", content: prompt }]
+        });
+
+        let responseText = message.content[0].text;
+        responseText = responseText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+
+        const firstBrace = responseText.indexOf('{');
+        const lastBrace = responseText.lastIndexOf('}');
+        if (firstBrace !== -1 && lastBrace !== -1 && firstBrace < lastBrace) {
+          responseText = responseText.substring(firstBrace, lastBrace + 1);
+        }
+
+        const result = JSON.parse(responseText);
+        return {
+          transaction_id: transaction.transaction_id,
+          questions: result.questions
+        };
+      } catch (error) {
+        console.error(`Error generating Q1 for ${transaction.name}:`, error);
+        return {
+          transaction_id: transaction.transaction_id,
+          questions: null,
+          error: error.message
+        };
+      }
+    });
+
+    const results = await Promise.all(promises);
+    console.log(`✅ Generated Q1 for ${results.filter(r => r.questions).length}/${transactions.length} transactions`);
+
+    res.json({ results });
+  } catch (error) {
+    console.error('❌ Error in bulk question generation:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Categorize transaction based on user's answers
 app.post('/api/categorize_from_answers', async (req, res) => {
   try {
