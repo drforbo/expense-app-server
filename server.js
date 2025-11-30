@@ -7,7 +7,7 @@ require('dotenv').config();
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '50mb' })); // Increase limit for base64 images
 
 // Initialize Plaid client
 const configuration = new Configuration({
@@ -1226,12 +1226,16 @@ app.post('/api/bulk_generate_first_questions', async (req, res) => {
       : userProfile?.work_type === 'side_hustle' ? 'side hustler'
       : userProfile?.custom_work_type || 'self-employed';
 
+    const businessStructureDesc = userProfile?.tracking_goal === 'sole_trader' ? 'sole trader'
+      : userProfile?.tracking_goal === 'limited_company' ? 'limited company director'
+      : 'self-employed (not yet registered)';
+
     // Generate Q1 for all transactions in parallel
     const promises = transactions.map(async (transaction) => {
       const isIncome = transaction.amount < 0;
 
       const prompt = isIncome
-        ? `You are a UK tax assistant helping a ${workTypeDesc} categorize income.
+        ? `You are a UK tax assistant helping a ${workTypeDesc} (${businessStructureDesc}) categorize income.
 
 TRANSACTION (INCOME):
 - Merchant/Payer: ${transaction.merchant_name || transaction.name}
@@ -1266,7 +1270,7 @@ Respond with ONLY valid JSON:
     }
   ]
 }`
-        : `You are a UK tax assistant helping a ${workTypeDesc} categorize expenses.
+        : `You are a UK tax assistant helping a ${workTypeDesc} (${businessStructureDesc}) categorize expenses.
 
 TRANSACTION:
 - Merchant: ${transaction.merchant_name || transaction.name}
@@ -1347,6 +1351,13 @@ app.post('/api/categorize_from_answers', async (req, res) => {
       : userProfile?.work_type === 'side_hustle' ? 'side hustler'
       : userProfile?.custom_work_type || 'self-employed';
 
+    const businessStructureDesc = userProfile?.tracking_goal === 'sole_trader' ? 'sole trader'
+      : userProfile?.tracking_goal === 'limited_company' ? 'limited company director'
+      : 'self-employed (not yet registered)';
+
+    const isSoleTrader = userProfile?.tracking_goal === 'sole_trader' || userProfile?.tracking_goal === 'not_registered';
+    const isLimitedCompany = userProfile?.tracking_goal === 'limited_company';
+
     // Check if this is income or expense
     const isIncome = transaction.amount < 0; // Plaid uses negative for income credits
 
@@ -1354,7 +1365,7 @@ app.post('/api/categorize_from_answers', async (req, res) => {
 - supplies: Office supplies, materials, equipment, props for content
 - software: Business software, tools, subscriptions, apps
 - marketing: Advertising, promotions, social media ads, brand materials
-- meals: Business meals and client entertainment (50% deductible per HMRC)
+- subsistence: Overnight business travel meals only (day-to-day meals and client entertainment NOT deductible)
 - mileage: Business travel (45p/mile for first 10k miles, then 25p/mile)
 - home_office: Rent, utilities, internet for home workspace (requires proportional calculation)
 - professional_services: Accountant, lawyer, consultant fees
@@ -1372,10 +1383,11 @@ app.post('/api/categorize_from_answers', async (req, res) => {
 
     // INCOME CATEGORIZATION
     if (isIncome) {
-      const incomePrompt = `You are a UK tax expert helping a ${workTypeDesc} categorize business income under HMRC rules.
+      const incomePrompt = `You are a UK tax expert helping a ${workTypeDesc} (${businessStructureDesc}) categorize business income under HMRC rules.
 
 USER PROFILE:
 - Work type: ${workTypeDesc}
+- Business structure: ${businessStructureDesc}
 - Monthly income: £${userProfile?.monthly_income || 'unknown'}
 - Has international income: ${userProfile?.has_international_income ? 'Yes' : 'No'}
 
@@ -1524,12 +1536,12 @@ FOR BUSINESS INCOME:
     // EXPENSE CATEGORIZATION - Original flow
     const categories = expenseCategories;
 
-    const prompt = `You are a UK tax expert helping a ${workTypeDesc} categorize expenses under HMRC rules.
+    const prompt = `You are a UK tax expert helping a ${workTypeDesc} (${businessStructureDesc}) categorize expenses under HMRC rules.
 
 USER PROFILE:
 - Work type: ${workTypeDesc}
+- Business structure: ${businessStructureDesc}
 - Monthly income: £${userProfile?.monthly_income || 'unknown'}
-- Tracking goal: ${userProfile?.tracking_goal || 'unknown'}
 
 TRANSACTION:
 - Merchant: ${transaction.merchant_name || transaction.name}
@@ -1610,10 +1622,50 @@ HMRC TAX RULES YOU MUST APPLY:
    - Equipment purchases (laptop, phone, camera, etc.) - these are 100% if bought for business
    - One-time equipment = 100% business (don't split)
 
-5. **Special Rules:**
-   - Business meals: Max 50% deductible (HMRC rule)
+5. **Special Rules - FOOD/MEALS (VERY STRICT):**
+   - **Day-to-day meals = NOT deductible** (your lunch, coffee, etc. - even if working)
+   - **Client entertainment/meals = NOT deductible** (HMRC specifically disallows)
+   - **Meals with colleagues discussing work = NOT deductible** (social/personal)
+   - **ONLY deductible:** Subsistence when traveling OVERNIGHT for business (hotel meals, etc.)
+   - **Temporary business travel:** Meals on day trips MAY be deductible if temporary workplace (not routine/commuting)
    - Mileage: Use 45p/mile (first 10k miles) instead of actual costs
    - Gifts to clients: Max £50/person/year
+
+6. **BUSINESS STRUCTURE-SPECIFIC RULES:**
+
+${isSoleTrader ? `**SOLE TRADER RULES (You are a sole trader):**
+   - Simpler expense rules - claim via Self Assessment
+   - Home office: Use simplified expenses (£6/week flat rate) - mention this in explanation
+   - Vehicle: Claim mileage allowance (45p/mile) rather than actual costs
+   - Equipment: Can claim full cost or use Annual Investment Allowance
+   - Phone/internet: Can claim business proportion
+   - Cannot charge yourself rent or pay yourself a salary
+   - Drawings are NOT expenses (taking money out is not deductible)
+
+   **When explaining expenses, mention:**
+   - "Claim via Self Assessment"
+   - For home office: "Use £6/week simplified expenses instead of actual costs"
+   - For vehicle: "Track mileage at 45p/mile"` : ''}
+
+${isLimitedCompany ? `**LIMITED COMPANY RULES (You are a limited company director):**
+   - More complex rules - company pays for expenses, you may face benefit in kind tax
+   - Home office: Can charge company rent (but may trigger personal tax on rental income)
+   - Vehicle: Company car triggers benefit in kind tax (P11D). Mileage claims for personal car better.
+   - Equipment: Company purchases - no benefit in kind if "wholly and exclusively" for business
+   - Phone/internet: Company can pay if used for business
+   - Personal expenses paid by company = benefit in kind (taxable on you personally)
+   - Be aware of IR35 rules if you're a contractor via limited company
+
+   **CRITICAL - Benefits in Kind Warnings:**
+   - Personal use of company assets may trigger P11D benefit in kind
+   - Expenses that benefit you personally (gym, personal meals, clothing to wear) = taxable benefit
+   - This means you pay personal tax on the value even if company paid
+
+   **When explaining expenses, add warnings for:**
+   - Home office: "Company can pay, but consider £6/week allowance to avoid rental income complications"
+   - Vehicle: "Company car triggers benefit in kind tax - consider mileage claims instead"
+   - Personal benefit items: "May trigger benefit in kind tax (P11D)"
+   - Clothing/grooming: "Personal benefit - may be taxable to you even if company expense"` : ''}
 
 DECISION PROCESS:
 1. Read the user's answer carefully - what did they actually say?
@@ -1636,12 +1688,22 @@ EXAMPLES OF INTERPRETATION:
 SIMPLE CASES:
 - "I bought this bike for commuting to my office" → Personal (commuting NOT deductible)
 - "I bought this bike for delivery work" → Business supplies (100%)
-- "Quick coffee on my own" → Personal
-- "Business meeting with client" → Business meals (50%)
 - "Camera for filming my content" → Business supplies (100%)
 - "Makeup to wear for work events/filming" → Personal (grooming - NOT deductible)
 - "Makeup to review or feature in a video" → Business supplies (100%)
 - "Foundation for everyday personal use" → Personal
+
+FOOD/MEAL CASES (STRICT UK RULES):
+- "Coffee while working" → Personal (NOT deductible)
+- "Lunch at desk" → Personal (NOT deductible)
+- "Coffee meeting with client" → Personal (client entertainment NOT allowed)
+- "Dinner with client to discuss project" → Personal (client entertainment NOT allowed)
+- "Meal with colleague discussing work" → Personal (social, NOT deductible)
+- "Lunch while traveling to Edinburgh for one-day client meeting" → Business subsistence (MAY be deductible if temporary workplace)
+- "Hotel breakfast while on overnight business trip" → Business subsistence (100% deductible)
+- "Meal during multi-day conference" → Business subsistence (100% deductible)
+- "Groceries for content video" → Business supplies (100% - this is INGREDIENTS/PROPS, not a meal)
+- "Takeaway because working late" → Personal (NOT deductible)
 
 HOME OFFICE CASES (AUTOMATIC - NO PERCENTAGE):
 - Q: "Rent" A: "I work from home"
@@ -1879,17 +1941,25 @@ ${categories}
 
 TASK: Automatically categorize this transaction based on common business use patterns.
 
-HMRC RULES:
+HMRC RULES (UK TAX YEAR ${hmrcRules.metadata.taxYear}):
 1. Business expenses must be "wholly and exclusively" for business
 2. Common business expenses for ${workTypeDesc}:
    - Equipment, software, materials = 100% supplies/software
    - Professional services = 100% professional_services
-   - Business meals = 50% meals
+   - Food/meals/restaurants = NOT DEDUCTIBLE (unless overnight business travel)
+   - Client entertainment = NOT DEDUCTIBLE
    - Clearly personal items = personal
+
+3. FOOD & MEALS RULES (STRICT IN UK):
+   - Regular meals (lunch, coffee, snacks) = NOT deductible
+   - Client meals/entertainment = NOT deductible
+   - Only deductible: Overnight business travel subsistence
+   - This is different from US rules - UK does NOT allow 50% meal deduction
 
 DECISION LOGIC:
 - If likely business-related (equipment, software, services) → Mark as business expense
 - If clearly personal (groceries, personal shopping) → Mark as personal
+- If food/meals/restaurants (Pret, Starbucks, etc.) → Mark as personal (NOT tax deductible)
 - When uncertain, prefer business if it's a common expense for this work type
 
 Respond with ONLY valid JSON:
@@ -1928,6 +1998,7 @@ Respond with ONLY valid JSON:
             explanation: categorization.explanation,
             tax_deductible: categorization.taxDeductible,
             user_answers: {}, // Empty for bulk categorization
+            rule_version: hmrcRules.metadata.version, // Track which rules were used
           }, {
             onConflict: 'user_id,plaid_transaction_id'
           });
@@ -2242,6 +2313,580 @@ app.post('/api/generate-guide', async (req, res) => {
     res.json({ guide });
   } catch (error) {
     console.error('❌ Error generating guide:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get last export date for a user
+app.post('/api/get_last_export_date', async (req, res) => {
+  try {
+    const { user_id } = req.body;
+
+    if (!user_id) {
+      return res.status(400).json({ error: 'user_id is required' });
+    }
+
+    const { data: profile, error } = await supabaseAdmin
+      .from('user_profiles')
+      .select('last_export_date')
+      .eq('user_id', user_id)
+      .single();
+
+    if (error) {
+      console.error('❌ Error fetching last export date:', error);
+      return res.status(500).json({ error: error.message });
+    }
+
+    res.json({ last_export_date: profile?.last_export_date || null });
+  } catch (error) {
+    console.error('❌ Error getting last export date:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Export categorized transactions to CSV
+app.post('/api/export_transactions', async (req, res) => {
+  try {
+    const { user_id, start_date, end_date } = req.body;
+
+    if (!user_id) {
+      return res.status(400).json({ error: 'user_id is required' });
+    }
+
+    console.log('📊 Exporting transactions for user:', user_id);
+    if (start_date) console.log('📅 Start date:', start_date);
+    if (end_date) console.log('📅 End date:', end_date);
+
+    // Build query with optional date filters
+    let query = supabaseAdmin
+      .from('categorized_transactions')
+      .select('*')
+      .eq('user_id', user_id);
+
+    // Add date filters if provided
+    if (start_date) {
+      query = query.gte('transaction_date', start_date);
+    }
+    if (end_date) {
+      query = query.lte('transaction_date', end_date);
+    }
+
+    const { data: transactions, error } = await query.order('transaction_date', { ascending: false });
+
+    if (error) {
+      console.error('❌ Error fetching transactions:', error);
+      return res.status(500).json({ error: error.message });
+    }
+
+    // Also fetch gifted items for the same date range
+    let giftedQuery = supabaseAdmin
+      .from('gifted_items')
+      .select('*')
+      .eq('user_id', user_id);
+
+    // Add date filters if provided
+    if (start_date) {
+      giftedQuery = giftedQuery.gte('received_date', start_date);
+    }
+    if (end_date) {
+      giftedQuery = giftedQuery.lte('received_date', end_date);
+    }
+
+    const { data: giftedItems, error: giftedError } = await giftedQuery.order('received_date', { ascending: false });
+
+    if (giftedError) {
+      console.error('❌ Error fetching gifted items:', giftedError);
+      // Don't fail the whole export, just continue without gifted items
+    }
+
+    console.log('✅ Found', transactions?.length || 0, 'transactions');
+    console.log('✅ Found', giftedItems?.length || 0, 'gifted items');
+
+    if ((!transactions || transactions.length === 0) && (!giftedItems || giftedItems.length === 0)) {
+      return res.status(404).json({ error: 'No transactions or gifted items found' });
+    }
+
+    // Generate CSV header
+    const csvHeaders = [
+      'Date',
+      'Merchant',
+      'Total Amount (£)',
+      'Business Amount (£)',
+      'Personal Amount (£)',
+      'Business %',
+      'Type',
+      'HMRC Category',
+      'Tax Deductible',
+      'Notes'
+    ];
+
+    // Generate CSV rows for transactions
+    const csvRows = (transactions || []).map(txn => {
+      // Use absolute value for amounts (Plaid returns negative for income/credits)
+      const totalAmount = Math.abs(txn.amount);
+      const businessPercent = txn.business_percent || 0;
+      const businessAmount = (totalAmount * businessPercent / 100).toFixed(2);
+      const personalAmount = (totalAmount * (100 - businessPercent) / 100).toFixed(2);
+
+      // Determine transaction type
+      let type;
+      if (businessPercent === 100) {
+        type = 'Business';
+      } else if (businessPercent === 0) {
+        type = 'Personal';
+      } else {
+        type = 'Split';
+      }
+
+      // Clean up explanation/notes - remove newlines and quotes for CSV
+      const notes = (txn.explanation || '')
+        .replace(/"/g, '""') // Escape double quotes
+        .replace(/\n/g, ' '); // Replace newlines with spaces
+
+      return [
+        txn.transaction_date,
+        `"${txn.merchant_name || ''}"`,
+        totalAmount.toFixed(2),
+        businessAmount,
+        personalAmount,
+        businessPercent,
+        type,
+        `"${txn.category_name || 'Uncategorized'}"`,
+        txn.tax_deductible ? 'Yes' : 'No',
+        `"${notes}"`
+      ].join(',');
+    });
+
+    // Generate CSV rows for gifted items (as income)
+    const giftedRows = (giftedItems || []).map(item => {
+      const rrp = parseFloat(item.rrp);
+
+      // Clean up notes
+      const notes = (item.notes || '')
+        .replace(/"/g, '""')
+        .replace(/\n/g, ' ');
+
+      return [
+        item.received_date,
+        `"${item.item_name || 'Gifted Item'}"`,
+        rrp.toFixed(2), // Positive amount for income
+        rrp.toFixed(2), // Business income
+        '0.00', // No personal portion
+        '100', // 100% business
+        'Income', // Type
+        '"Gifted Item (Income)"', // Category
+        'Yes', // Tax relevant
+        `"GIFTED ITEM: ${item.item_name} (RRP £${rrp.toFixed(2)})${item.received_from ? ' | From: ' + item.received_from : ''}${item.reason ? ' | Reason: ' + item.reason : ''} ${notes ? '- ' + notes : ''}"`
+      ].join(',');
+    });
+
+    // Combine headers and rows (transactions + gifted items)
+    const allRows = [...csvRows, ...giftedRows];
+    const csv = [csvHeaders.join(','), ...allRows].join('\n');
+
+    console.log('✅ CSV generated successfully');
+
+    // Update last export date in user_profiles
+    try {
+      await supabaseAdmin
+        .from('user_profiles')
+        .update({ last_export_date: new Date().toISOString() })
+        .eq('user_id', user_id);
+      console.log('✅ Updated last_export_date for user');
+    } catch (updateError) {
+      // Don't fail the export if we can't update the timestamp
+      console.error('⚠️  Failed to update last_export_date:', updateError);
+    }
+
+    // Set headers for file download
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename="bopp_transactions.csv"');
+    res.send(csv);
+
+  } catch (error) {
+    console.error('❌ Error exporting transactions:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET endpoint for browser downloads (iOS Safari compatible)
+app.get('/api/download_transactions', async (req, res) => {
+  try {
+    console.log('📥 Download transactions request received (GET)');
+
+    const { user_id, start_date, end_date } = req.query;
+
+    if (!user_id) {
+      return res.status(400).json({ error: 'user_id is required' });
+    }
+
+    console.log('👤 User ID:', user_id);
+    if (start_date) console.log('📅 Start date:', start_date);
+    if (end_date) console.log('📅 End date:', end_date);
+
+    // Fetch categorized transactions
+    let query = supabaseAdmin
+      .from('categorized_transactions')
+      .select('*')
+      .eq('user_id', user_id);
+
+    // Add date filters if provided
+    if (start_date) {
+      query = query.gte('transaction_date', start_date);
+    }
+    if (end_date) {
+      query = query.lte('transaction_date', end_date);
+    }
+
+    const { data: transactions, error } = await query.order('transaction_date', { ascending: false });
+
+    if (error) {
+      console.error('❌ Error fetching transactions:', error);
+      return res.status(500).json({ error: 'Failed to fetch transactions' });
+    }
+
+    // Debug: Check if user_answers is being fetched
+    if (transactions && transactions.length > 0) {
+      console.log('📊 Sample transaction user_answers:', transactions[0].user_answers);
+      console.log('📊 User answers type:', typeof transactions[0].user_answers);
+    }
+
+    // Also fetch gifted items for the same date range
+    let giftedQuery = supabaseAdmin
+      .from('gifted_items')
+      .select('*')
+      .eq('user_id', user_id);
+
+    // Add date filters if provided
+    if (start_date) {
+      giftedQuery = giftedQuery.gte('received_date', start_date);
+    }
+    if (end_date) {
+      giftedQuery = giftedQuery.lte('received_date', end_date);
+    }
+
+    const { data: giftedItems, error: giftedError } = await giftedQuery.order('received_date', { ascending: false });
+
+    if (giftedError) {
+      console.error('❌ Error fetching gifted items:', giftedError);
+      // Don't fail the whole export, just continue without gifted items
+    }
+
+    console.log('✅ Found', transactions?.length || 0, 'transactions');
+    console.log('✅ Found', giftedItems?.length || 0, 'gifted items');
+
+    if ((!transactions || transactions.length === 0) && (!giftedItems || giftedItems.length === 0)) {
+      return res.status(404).send('No transactions or gifted items found for export');
+    }
+
+    // Helper function to format user answers for CSV
+    const formatUserAnswers = (userAnswers) => {
+      console.log('🔍 Formatting user_answers:', JSON.stringify(userAnswers));
+      if (!userAnswers || typeof userAnswers !== 'object' || Object.keys(userAnswers).length === 0) {
+        console.log('⚠️ User answers is empty or invalid');
+        return '';
+      }
+      // Format as "Q: Answer; Q: Answer"
+      const formatted = Object.entries(userAnswers)
+        .map(([key, value]) => `${key}: ${value}`)
+        .join('; ')
+        .replace(/"/g, '""'); // Escape quotes for CSV
+      console.log('✅ Formatted result:', formatted);
+      return formatted;
+    };
+
+    // Generate CSV header
+    const csvHeaders = [
+      'Date',
+      'Merchant',
+      'Total Amount (£)',
+      'Business Amount (£)',
+      'Personal Amount (£)',
+      'Business %',
+      'Type',
+      'HMRC Category',
+      'Tax Deductible',
+      'Notes',
+      'User Answers'
+    ];
+
+    // Generate CSV rows for transactions
+    const csvRows = (transactions || []).map(txn => {
+      // Use absolute value for amounts (Plaid returns negative for income/credits)
+      const totalAmount = Math.abs(txn.amount);
+      const businessPercent = txn.business_percent || 0;
+      const businessAmount = (totalAmount * businessPercent / 100).toFixed(2);
+      const personalAmount = (totalAmount * (100 - businessPercent) / 100).toFixed(2);
+
+      return [
+        txn.transaction_date,
+        `"${(txn.merchant_name || 'Unknown').replace(/"/g, '""')}"`,
+        totalAmount.toFixed(2),
+        businessAmount,
+        personalAmount,
+        businessPercent.toFixed(0),
+        txn.transaction_type || 'Expense',
+        `"${(txn.category_name || 'Uncategorized').replace(/"/g, '""')}"`,
+        txn.tax_deductible ? 'Yes' : 'No',
+        `"${(txn.explanation || '').replace(/"/g, '""')}"`,
+        `"${formatUserAnswers(txn.user_answers)}"`
+      ].join(',');
+    });
+
+    // Generate CSV rows for gifted items
+    const giftedRows = (giftedItems || []).map(item => {
+      const estimatedValue = item.estimated_value || 0;
+
+      return [
+        item.received_date,
+        `"${(item.brand_company || 'Unknown').replace(/"/g, '""')}"`,
+        estimatedValue.toFixed(2),
+        estimatedValue.toFixed(2), // Business amount = total for gifted items
+        '0.00', // Personal amount = 0 for gifted items
+        '100', // Business % = 100% for gifted items
+        'Income (Gifted)',
+        '"Gifts/PR Packages"',
+        'Taxable',
+        `"Item: ${(item.item_name || 'N/A').replace(/"/g, '""')}, From: ${(item.received_from || 'N/A').replace(/"/g, '""')}, Reason: ${(item.reason || 'N/A').replace(/"/g, '""')}"`,
+        '""' // Empty User Answers for gifted items
+      ].join(',');
+    });
+
+    // Combine headers and rows (transactions + gifted items)
+    const allRows = [...csvRows, ...giftedRows];
+    const csv = [csvHeaders.join(','), ...allRows].join('\n');
+
+    console.log('✅ CSV generated successfully');
+
+    // Update last export date in user_profiles
+    try {
+      await supabaseAdmin
+        .from('user_profiles')
+        .update({ last_export_date: new Date().toISOString() })
+        .eq('user_id', user_id);
+      console.log('✅ Updated last_export_date for user');
+    } catch (updateError) {
+      // Don't fail the export if we can't update the timestamp
+      console.error('⚠️  Failed to update last_export_date:', updateError);
+    }
+
+    // Generate filename with current date
+    const fileName = `bopp_transactions_${new Date().toISOString().split('T')[0]}.csv`;
+
+    // Set headers for browser download
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+    res.setHeader('Cache-Control', 'no-cache');
+    res.send(csv);
+
+  } catch (error) {
+    console.error('❌ Error downloading transactions:', error);
+    res.status(500).send('Error generating export file');
+  }
+});
+
+// ============================================================================
+// GIFTED ITEMS ENDPOINTS
+// ============================================================================
+
+// Recognize item from image using AI vision
+app.post('/api/recognize_item', async (req, res) => {
+  try {
+    const { image_base64 } = req.body;
+
+    if (!image_base64) {
+      return res.status(400).json({ error: 'image_base64 is required' });
+    }
+
+    console.log('🔍 Analyzing item image...');
+
+    const message = await anthropic.messages.create({
+      model: 'claude-3-5-haiku-20241022',
+      max_tokens: 1024,
+      messages: [{
+        role: 'user',
+        content: [
+          {
+            type: 'image',
+            source: {
+              type: 'base64',
+              media_type: 'image/jpeg',
+              data: image_base64,
+            },
+          },
+          {
+            type: 'text',
+            text: `Analyze this image and identify the item shown. Provide:
+1. A clear, concise item name (e.g., "iPhone 15 Pro", "Nike Air Max Trainers", "Dyson V15 Vacuum")
+2. An estimated UK retail price (RRP) in GBP
+
+Respond in this exact JSON format:
+{
+  "item_name": "Item Name",
+  "estimated_rrp": 999.99
+}
+
+If you cannot identify the item clearly, use your best judgment based on what you can see. For the price, estimate based on typical UK retail prices for similar items.`,
+          },
+        ],
+      }],
+    });
+
+    const responseText = message.content[0].text;
+    console.log('🤖 AI response:', responseText);
+
+    // Parse JSON response
+    const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      throw new Error('Could not parse AI response');
+    }
+
+    const result = JSON.parse(jsonMatch[0]);
+
+    console.log('✅ Item recognized:', result.item_name, '- £' + result.estimated_rrp);
+
+    res.json(result);
+  } catch (error) {
+    console.error('❌ Error recognizing item:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Create a new gifted item
+app.post('/api/create_gifted_item', async (req, res) => {
+  try {
+    const { user_id, item_name, rrp, photo_url, notes, received_date, received_from, reason } = req.body;
+
+    if (!user_id || !item_name || !rrp) {
+      return res.status(400).json({ error: 'user_id, item_name, and rrp are required' });
+    }
+
+    console.log('📝 Creating gifted item:', item_name, '- £' + rrp);
+
+    const { data, error } = await supabaseAdmin
+      .from('gifted_items')
+      .insert([{
+        user_id,
+        item_name,
+        rrp,
+        photo_url: photo_url || null,
+        notes: notes || null,
+        received_date: received_date || new Date().toISOString().split('T')[0],
+        received_from: received_from || null,
+        reason: reason || null,
+      }])
+      .select()
+      .single();
+
+    if (error) {
+      console.error('❌ Error creating gifted item:', error);
+      return res.status(500).json({ error: error.message });
+    }
+
+    console.log('✅ Gifted item created:', data.id);
+    res.json(data);
+  } catch (error) {
+    console.error('❌ Error creating gifted item:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get all gifted items for a user
+app.post('/api/get_gifted_items', async (req, res) => {
+  try {
+    const { user_id } = req.body;
+
+    if (!user_id) {
+      return res.status(400).json({ error: 'user_id is required' });
+    }
+
+    console.log('📊 Fetching gifted items for user:', user_id);
+
+    const { data, error } = await supabaseAdmin
+      .from('gifted_items')
+      .select('*')
+      .eq('user_id', user_id)
+      .order('received_date', { ascending: false });
+
+    if (error) {
+      console.error('❌ Error fetching gifted items:', error);
+      return res.status(500).json({ error: error.message });
+    }
+
+    console.log('✅ Found', data.length, 'gifted items');
+    res.json(data);
+  } catch (error) {
+    console.error('❌ Error fetching gifted items:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Update a gifted item
+app.post('/api/update_gifted_item', async (req, res) => {
+  try {
+    const { id, item_name, rrp, photo_url, notes, received_date, received_from, reason } = req.body;
+
+    if (!id) {
+      return res.status(400).json({ error: 'id is required' });
+    }
+
+    console.log('✏️  Updating gifted item:', id);
+
+    const updates = {};
+    if (item_name !== undefined) updates.item_name = item_name;
+    if (rrp !== undefined) updates.rrp = rrp;
+    if (photo_url !== undefined) updates.photo_url = photo_url;
+    if (notes !== undefined) updates.notes = notes;
+    if (received_date !== undefined) updates.received_date = received_date;
+    if (received_from !== undefined) updates.received_from = received_from;
+    if (reason !== undefined) updates.reason = reason;
+    updates.updated_at = new Date().toISOString();
+
+    const { data, error } = await supabaseAdmin
+      .from('gifted_items')
+      .update(updates)
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) {
+      console.error('❌ Error updating gifted item:', error);
+      return res.status(500).json({ error: error.message });
+    }
+
+    console.log('✅ Gifted item updated');
+    res.json(data);
+  } catch (error) {
+    console.error('❌ Error updating gifted item:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Delete a gifted item
+app.post('/api/delete_gifted_item', async (req, res) => {
+  try {
+    const { id } = req.body;
+
+    if (!id) {
+      return res.status(400).json({ error: 'id is required' });
+    }
+
+    console.log('🗑️  Deleting gifted item:', id);
+
+    const { error } = await supabaseAdmin
+      .from('gifted_items')
+      .delete()
+      .eq('id', id);
+
+    if (error) {
+      console.error('❌ Error deleting gifted item:', error);
+      return res.status(500).json({ error: error.message });
+    }
+
+    console.log('✅ Gifted item deleted');
+    res.json({ success: true });
+  } catch (error) {
+    console.error('❌ Error deleting gifted item:', error);
     res.status(500).json({ error: error.message });
   }
 });
