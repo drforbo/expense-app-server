@@ -1,26 +1,28 @@
 const express = require('express');
 const cors = require('cors');
-const { Configuration, PlaidApi, PlaidEnvironments } = require('plaid');
 const Anthropic = require('@anthropic-ai/sdk');
 const { createClient } = require('@supabase/supabase-js');
+const crypto = require('crypto');
+const multer = require('multer');
+const pdfParse = require('pdf-parse');
 require('dotenv').config();
 
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '50mb' })); // Increase limit for base64 images
 
-// Initialize Plaid client
-const configuration = new Configuration({
-  basePath: PlaidEnvironments[process.env.PLAID_ENV],
-  baseOptions: {
-    headers: {
-      'PLAID-CLIENT-ID': process.env.PLAID_CLIENT_ID,
-      'PLAID-SECRET': process.env.PLAID_SECRET,
-    },
-  },
+// Configure multer for PDF uploads
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB limit
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype === 'application/pdf') {
+      cb(null, true);
+    } else {
+      cb(new Error('Only PDF files are allowed'), false);
+    }
+  }
 });
-
-const plaidClient = new PlaidApi(configuration);
 
 // Initialize Anthropic client
 const anthropic = new Anthropic({
@@ -39,512 +41,325 @@ const supabaseAdmin = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-// Create link token
-app.post('/api/create_link_token', async (req, res) => {
+// ============================================
+// PDF BANK STATEMENT UPLOAD & TRANSACTION EXTRACTION
+// ============================================
+
+// Helper function to extract transactions from PDF using Claude
+async function extractTransactionsFromPDF(pdfBuffer) {
   try {
-    const { userId } = req.body;
-    console.log('📥 Creating link token for user:', userId);
-    
-    const response = await plaidClient.linkTokenCreate({
-      user: { client_user_id: userId },
-      client_name: 'bopp',
-      products: ['transactions'],
-      country_codes: ['GB'],
-      language: 'en',
+    // Extract text from PDF
+    const pdfData = await pdfParse(pdfBuffer);
+    const pageCount = pdfData.numpages;
+
+    console.log(`📄 Processing PDF with ${pageCount} pages`);
+    console.log(`📝 Extracted ${pdfData.text.length} characters of text`);
+
+    // Truncate text if too long - process in chunks if needed
+    const textToProcess = pdfData.text.substring(0, 100000);
+
+    // Use Claude to parse the text content and extract transactions
+    const message = await anthropic.messages.create({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 16000,
+      messages: [{
+        role: "user",
+        content: `You are a bank statement parser. Extract ALL individual transactions from this bank statement text.
+
+IMPORTANT RULES:
+1. Extract EVERY transaction you can find - do not skip any
+2. For amount: Use POSITIVE numbers for money going OUT (debits/expenses/purchases), NEGATIVE numbers for money coming IN (credits/income/deposits)
+3. For dates: Convert to YYYY-MM-DD format
+4. For merchant_name: Clean up the name - remove card numbers, reference codes, and extract the actual merchant/payee name
+5. Skip balance entries, opening balances, closing balances - only include actual transactions
+6. Look for patterns like dates followed by descriptions and amounts
+7. Common UK bank formats: "DD MMM" or "DD/MM/YYYY" dates, amounts with £ symbol
+
+BANK STATEMENT TEXT:
+${textToProcess}
+
+You MUST respond with ONLY a valid JSON array. No explanation, no markdown, just the raw JSON array starting with [ and ending with ].
+
+Format:
+[{"merchant_name": "Tesco", "amount": 45.23, "transaction_date": "2024-01-15", "description": "Original transaction text"}]
+
+If no transactions found, respond with exactly: []`
+      }]
     });
 
-    console.log('✅ Link token created successfully');
-    res.json({ link_token: response.data.link_token });
-  } catch (error) {
-    console.error('❌ Error creating link token:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
+    let responseText = message.content[0].text;
+    console.log(`🤖 Claude response length: ${responseText.length} chars`);
+    console.log(`🤖 First 500 chars: ${responseText.substring(0, 500)}`);
+    console.log(`🤖 Last 200 chars: ${responseText.substring(responseText.length - 200)}`);
 
-// Create sandbox access token (for testing without Plaid Link UI)
-app.post('/api/create_sandbox_token', async (req, res) => {
-  try {
-    const { userId } = req.body;
-    console.log('🔧 Creating sandbox access token for user:', userId);
-    
-    // Create a sandbox item (fake bank connection)
-    const createResponse = await plaidClient.sandboxPublicTokenCreate({
-      institution_id: 'ins_109508', // Chase (sandbox)
-      initial_products: ['transactions'],
-    });
-    
-    console.log('✅ Sandbox public token created');
-    
-    // Exchange for access token
-    const exchangeResponse = await plaidClient.itemPublicTokenExchange({
-      public_token: createResponse.data.public_token,
-    });
-    
-    const access_token = exchangeResponse.data.access_token;
-    console.log('✅ Access token obtained:', access_token.substring(0, 20) + '...');
-    
-    res.json({ 
-      access_token,
-      message: 'Sandbox bank connected'
-    });
-  } catch (error) {
-    console.error('❌ Error creating sandbox token:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
+    // Clean up the response - remove markdown code blocks if present
+    responseText = responseText.replace(/```json\n?/gi, '').replace(/```\n?/g, '').trim();
 
-// Exchange public token for access token
-app.post('/api/exchange_public_token', async (req, res) => {
-  try {
-    const { public_token, userId } = req.body;
-    console.log('🔄 Exchanging public token for user:', userId);
-    
-    const response = await plaidClient.itemPublicTokenExchange({
-      public_token: public_token,
-    });
-
-    const access_token = response.data.access_token;
-    const item_id = response.data.item_id;
-
-    console.log('✅ Access token obtained');
-    res.json({ 
-      access_token,
-      item_id,
-      message: 'Bank connected successfully'
-    });
-  } catch (error) {
-    console.error('❌ Error exchanging token:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Sync transactions from Plaid using the Sync API (better for sandbox)
-app.post('/api/sync_transactions', async (req, res) => {
-  try {
-    const { access_token, useMockData = false, user_id } = req.body;
-    console.log('📊 Syncing transactions from Plaid sandbox...');
-
-    let allTransactions = [];
-
-    // For testing: Always use mock data for consistent IDs
-    if (useMockData) {
-      console.log('🧪 Using mock data for testing (consistent transaction IDs)...');
-
-      const today = new Date();
-      const mockTransactions = [
-        // EXPENSES
-        {
-          transaction_id: 'mock-exp-1',
-          name: 'Canon Camera Store',
-          merchant_name: 'Canon UK',
-          amount: 1299.00,
-          date: new Date(today.getTime() - 1 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-          category: ['Shops', 'Electronics']
-        },
-        {
-          transaction_id: 'mock-exp-2',
-          name: 'Ring Light Pro',
-          merchant_name: 'Amazon',
-          amount: 79.99,
-          date: new Date(today.getTime() - 2 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-          category: ['Shops', 'Electronics']
-        },
-        {
-          transaction_id: 'mock-exp-3',
-          name: 'Notion Pro',
-          merchant_name: 'Notion Labs',
-          amount: 8.00,
-          date: new Date(today.getTime() - 3 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-          category: ['Service', 'Software Subscription']
-        },
-        {
-          transaction_id: 'mock-exp-4',
-          name: 'Leon Restaurant',
-          merchant_name: 'Leon',
-          amount: 15.50,
-          date: new Date(today.getTime() - 1 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-          category: ['Food and Drink', 'Restaurants']
-        },
-        {
-          transaction_id: 'mock-exp-5',
-          name: 'Deliveroo Order',
-          merchant_name: 'Deliveroo',
-          amount: 28.90,
-          date: new Date(today.getTime() - 4 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-          category: ['Food and Drink', 'Food Delivery']
-        },
-        {
-          transaction_id: 'mock-exp-6',
-          name: 'BP Petrol',
-          merchant_name: 'BP',
-          amount: 45.20,
-          date: new Date(today.getTime() - 2 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-          category: ['Travel', 'Gas Stations']
-        },
-        {
-          transaction_id: 'mock-exp-7',
-          name: 'WeWork Hot Desk',
-          merchant_name: 'WeWork',
-          amount: 35.00,
-          date: new Date(today.getTime() - 5 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-          category: ['Service', 'Workspace']
-        },
-        {
-          transaction_id: 'mock-exp-8',
-          name: 'Udemy Course',
-          merchant_name: 'Udemy',
-          amount: 89.99,
-          date: new Date(today.getTime() - 6 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-          category: ['Service', 'Education']
-        },
-        {
-          transaction_id: 'mock-exp-9',
-          name: 'Microphone USB',
-          merchant_name: 'Scan Computers',
-          amount: 129.00,
-          date: new Date(today.getTime() - 3 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-          category: ['Shops', 'Electronics']
-        },
-        {
-          transaction_id: 'mock-exp-10',
-          name: 'Instagram Ads',
-          merchant_name: 'Meta Platforms',
-          amount: 250.00,
-          date: new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-          category: ['Service', 'Advertising']
-        },
-        {
-          transaction_id: 'mock-exp-11',
-          name: 'Stationery',
-          merchant_name: 'Ryman',
-          amount: 22.40,
-          date: new Date(today.getTime() - 4 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-          category: ['Shops', 'Office Supplies']
-        },
-        {
-          transaction_id: 'mock-exp-12',
-          name: 'Canva Pro',
-          merchant_name: 'Canva',
-          amount: 10.99,
-          date: new Date(today.getTime() - 5 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-          category: ['Service', 'Software Subscription']
-        },
-        {
-          transaction_id: 'mock-exp-13',
-          name: 'Train Ticket',
-          merchant_name: 'Trainline',
-          amount: 67.50,
-          date: new Date(today.getTime() - 8 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-          category: ['Travel', 'Public Transport']
-        },
-        {
-          transaction_id: 'mock-exp-14',
-          name: 'Accountant Fee',
-          merchant_name: 'Smith & Co Accounting',
-          amount: 300.00,
-          date: new Date(today.getTime() - 9 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-          category: ['Service', 'Professional Services']
-        },
-        {
-          transaction_id: 'mock-exp-15',
-          name: 'Zara',
-          merchant_name: 'Zara',
-          amount: 89.99,
-          date: new Date(today.getTime() - 2 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-          category: ['Shops', 'Clothing']
-        },
-
-        // INCOME TRANSACTIONS (negative amounts = credits in Plaid)
-        {
-          transaction_id: 'mock-income-1',
-          name: 'TikTok Creator Fund',
-          merchant_name: 'TikTok Ltd',
-          amount: -320.50,
-          date: new Date(today.getTime() - 2 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-          category: ['Transfer', 'Deposit']
-        },
-        {
-          transaction_id: 'mock-income-2',
-          name: 'Sponsorship Deal',
-          merchant_name: 'GlowUp Beauty',
-          amount: -2500.00,
-          date: new Date(today.getTime() - 5 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-          category: ['Transfer', 'Deposit']
-        },
-        {
-          transaction_id: 'mock-income-3',
-          name: 'Freelance Project',
-          merchant_name: 'Digital Agency Ltd',
-          amount: -1750.00,
-          date: new Date(today.getTime() - 3 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-          category: ['Transfer', 'Deposit']
-        },
-        {
-          transaction_id: 'mock-income-4',
-          name: 'Affiliate Payout',
-          merchant_name: 'Amazon Associates',
-          amount: -187.30,
-          date: new Date(today.getTime() - 6 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-          category: ['Transfer', 'Deposit']
-        },
-        {
-          transaction_id: 'mock-income-5',
-          name: 'Bank Transfer',
-          merchant_name: 'Sarah Johnson',
-          amount: -50.00,
-          date: new Date(today.getTime() - 1 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-          category: ['Transfer', 'Deposit']
+    // Check if the response was truncated (starts with [ but doesn't end with ])
+    if (responseText.startsWith('[') && !responseText.trim().endsWith(']')) {
+      console.log('⚠️ Response appears truncated, attempting to fix...');
+      // Find the last complete JSON object and close the array
+      const lastCompleteObject = responseText.lastIndexOf('},');
+      if (lastCompleteObject > 0) {
+        responseText = responseText.substring(0, lastCompleteObject + 1) + ']';
+        console.log(`✅ Fixed truncated response, cut at position ${lastCompleteObject}`);
+      } else {
+        // Try to find a single complete object
+        const lastBrace = responseText.lastIndexOf('}');
+        if (lastBrace > 0) {
+          responseText = responseText.substring(0, lastBrace + 1) + ']';
+          console.log(`✅ Fixed truncated response with single object fix`);
         }
-      ];
+      }
+    }
 
-      allTransactions = mockTransactions;
-      console.log('✅ Using 20 mock transactions (15 expenses + 5 income)');
-    } else {
-      // Use real Plaid data - only last 30 days
-      console.log('🔄 Fetching real Plaid transactions (last 30 days)...');
+    // Find the JSON array in the response - greedy match to get full array
+    const jsonMatch = responseText.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) {
+      console.error('❌ No JSON array found in response');
+      console.error('❌ Full response:', responseText.substring(0, 2000));
+      return [];
+    }
 
-      const thirtyDaysAgo = new Date();
-      thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    let transactions;
+    try {
+      transactions = JSON.parse(jsonMatch[0]);
+    } catch (parseError) {
+      console.error('❌ JSON parse error:', parseError.message);
+      console.error('❌ Attempted to parse (first 1000 chars):', jsonMatch[0].substring(0, 1000));
+      console.error('❌ Attempted to parse (last 500 chars):', jsonMatch[0].substring(jsonMatch[0].length - 500));
+      return [];
+    }
 
-      let hasMore = true;
-      let cursor = null;
-      let batchCount = 0;
-      const maxBatches = 5; // Limit to prevent infinite loops
+    console.log(`✅ Extracted ${transactions.length} transactions from PDF`);
 
-      while (hasMore && batchCount < maxBatches) {
-        const request = {
-          access_token: access_token,
-        };
+    return transactions;
+  } catch (error) {
+    console.error('❌ Error extracting transactions from PDF:', error);
+    throw error;
+  }
+}
 
-        if (cursor) {
-          request.cursor = cursor;
-        }
+// Upload and process bank statement PDF
+app.post('/api/upload_statement', upload.single('pdf'), async (req, res) => {
+  try {
+    const { user_id } = req.body;
+    const file = req.file;
 
-        const response = await plaidClient.transactionsSync(request);
+    if (!user_id) {
+      return res.status(400).json({ error: 'user_id is required' });
+    }
 
-        const { added, modified, removed, next_cursor, has_more } = response.data;
+    if (!file) {
+      return res.status(400).json({ error: 'PDF file is required' });
+    }
 
-        // Filter to only last 30 days
-        const recentAdded = added.filter(t => {
-          const txDate = new Date(t.date);
-          return txDate >= thirtyDaysAgo;
+    console.log(`📤 Uploading statement for user: ${user_id}`);
+    console.log(`📄 File: ${file.originalname}, Size: ${(file.size / 1024).toFixed(1)}KB`);
+
+    // 1. Upload PDF to Supabase Storage
+    const fileName = `${user_id}/${Date.now()}_${file.originalname}`;
+    const { data: uploadData, error: uploadError } = await supabaseAdmin.storage
+      .from('bank-statements')
+      .upload(fileName, file.buffer, {
+        contentType: 'application/pdf',
+        upsert: false
+      });
+
+    if (uploadError) {
+      console.error('❌ Storage upload error:', uploadError);
+      throw new Error(`Failed to upload PDF: ${uploadError.message}`);
+    }
+
+    // Get public URL
+    const { data: { publicUrl } } = supabaseAdmin.storage
+      .from('bank-statements')
+      .getPublicUrl(fileName);
+
+    console.log(`✅ PDF uploaded to storage: ${fileName}`);
+
+    // 2. Create statement record (status: processing)
+    const { data: statement, error: stmtError } = await supabaseAdmin
+      .from('bank_statements')
+      .insert({
+        user_id,
+        filename: file.originalname,
+        file_url: publicUrl,
+        status: 'processing'
+      })
+      .select()
+      .single();
+
+    if (stmtError) {
+      console.error('❌ Error creating statement record:', stmtError);
+      throw stmtError;
+    }
+
+    console.log(`📝 Statement record created: ${statement.id}`);
+
+    // 3. Extract transactions using Claude
+    console.log('🤖 Extracting transactions with AI...');
+    const transactions = await extractTransactionsFromPDF(file.buffer);
+
+    // 4. Save transactions with deduplication
+    let savedCount = 0;
+    let duplicateCount = 0;
+
+    for (const txn of transactions) {
+      // Validate required fields
+      if (!txn.merchant_name || txn.amount === undefined || !txn.transaction_date) {
+        console.log('⚠️  Skipping invalid transaction:', txn);
+        continue;
+      }
+
+      // Generate hash for deduplication (date + amount + merchant)
+      const hashInput = `${txn.transaction_date}_${txn.amount}_${txn.merchant_name}`.toLowerCase().trim();
+      const transactionHash = crypto.createHash('md5').update(hashInput).digest('hex');
+
+      const { error: insertError } = await supabaseAdmin
+        .from('uploaded_transactions')
+        .insert({
+          user_id,
+          statement_id: statement.id,
+          merchant_name: txn.merchant_name,
+          amount: parseFloat(txn.amount),
+          transaction_date: txn.transaction_date,
+          description: txn.description || null,
+          transaction_hash: transactionHash
         });
 
-        allTransactions = allTransactions.concat(recentAdded);
-        hasMore = has_more;
-        cursor = next_cursor;
-        batchCount++;
-
-        console.log(`📥 Batch ${batchCount}: ${recentAdded.length}/${added.length} recent transactions`);
-
-        // Stop if we've gone past 30 days
-        if (added.length > 0 && added.every(t => new Date(t.date) < thirtyDaysAgo)) {
-          console.log('⏹️  Reached transactions older than 30 days, stopping');
-          break;
-        }
-      }
-
-      console.log(`✅ Total found from Plaid (last 30 days): ${allTransactions.length} transactions`);
-
-      // If sandbox still returns 0 transactions, use mock data as fallback
-      if (allTransactions.length === 0) {
-        console.log('⚠️  No transactions from Plaid, falling back to mock data...');
-
-        const today = new Date();
-        const mockTransactions = [
-          {
-            transaction_id: 'mock-1',
-            name: 'Boots',
-            merchant_name: 'Boots',
-            amount: 24.99,
-            date: new Date(today.getTime() - 2 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-            category: ['Shops', 'Health and Beauty']
-          },
-          {
-            transaction_id: 'mock-2',
-            name: 'Tesco',
-            merchant_name: 'Tesco',
-            amount: 45.20,
-            date: new Date(today.getTime() - 5 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-            category: ['Food and Drink', 'Groceries']
-          },
-          {
-            transaction_id: 'mock-3',
-            name: 'Amazon',
-            merchant_name: 'Amazon',
-            amount: 89.99,
-            date: new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-            category: ['Shops', 'Digital Purchase']
-          },
-          {
-            transaction_id: 'mock-4',
-            name: 'Starbucks',
-            merchant_name: 'Starbucks',
-            amount: 4.50,
-            date: new Date(today.getTime() - 1 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-            category: ['Food and Drink', 'Restaurants', 'Coffee Shop']
-          },
-          {
-            transaction_id: 'mock-5',
-            name: 'Shell',
-            merchant_name: 'Shell',
-            amount: 52.00,
-            date: new Date(today.getTime() - 3 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-            category: ['Travel', 'Gas Stations']
-          },
-          {
-            transaction_id: 'mock-6',
-            name: 'Currys',
-            merchant_name: 'Currys',
-            amount: 299.99,
-            date: new Date(today.getTime() - 10 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-            category: ['Shops', 'Electronics']
-          },
-          {
-            transaction_id: 'mock-7',
-            name: 'Sainsburys',
-            merchant_name: 'Sainsburys',
-            amount: 38.45,
-            date: new Date(today.getTime() - 4 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-            category: ['Food and Drink', 'Groceries']
-          },
-          {
-            transaction_id: 'mock-8',
-            name: 'Adobe Creative Cloud',
-            merchant_name: 'Adobe',
-            amount: 54.99,
-            date: new Date(today.getTime() - 6 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-            category: ['Service', 'Subscription']
-          },
-          {
-            transaction_id: 'mock-9',
-            name: 'Pret A Manger',
-            merchant_name: 'Pret A Manger',
-            amount: 8.75,
-            date: new Date(today.getTime() - 1 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-            category: ['Food and Drink', 'Restaurants']
-          },
-          {
-            transaction_id: 'mock-10',
-            name: 'Uber',
-            merchant_name: 'Uber',
-            amount: 15.20,
-            date: new Date(today.getTime() - 3 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-            category: ['Travel', 'Taxi']
-          },
-          {
-            transaction_id: 'mock-11',
-            name: 'Apple Store',
-            merchant_name: 'Apple',
-            amount: 129.00,
-            date: new Date(today.getTime() - 8 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-            category: ['Shops', 'Electronics']
-          },
-          {
-            transaction_id: 'mock-12',
-            name: 'Waterstones',
-            merchant_name: 'Waterstones',
-            amount: 22.99,
-            date: new Date(today.getTime() - 9 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-            category: ['Shops', 'Bookstores']
-          },
-          {
-            transaction_id: 'mock-13',
-            name: 'Costa Coffee',
-            merchant_name: 'Costa',
-            amount: 5.20,
-            date: new Date(today.getTime() - 2 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-            category: ['Food and Drink', 'Coffee Shop']
-          },
-          {
-            transaction_id: 'mock-14',
-            name: 'Argos',
-            merchant_name: 'Argos',
-            amount: 67.50,
-            date: new Date(today.getTime() - 11 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-            category: ['Shops', 'General Merchandise']
-          },
-          {
-            transaction_id: 'mock-15',
-            name: 'EE Mobile',
-            merchant_name: 'EE',
-            amount: 35.00,
-            date: new Date(today.getTime() - 12 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-            category: ['Service', 'Mobile Phone']
-          }
-        ];
-
-        allTransactions = mockTransactions;
-        console.log('✅ Using 15 mock transactions');
-      }
-    }
-
-    // Sort by date descending (newest first)
-    const sortedTransactions = allTransactions.sort((a, b) =>
-      new Date(b.date).getTime() - new Date(a.date).getTime()
-    );
-
-    // Filter out already categorized transactions if user_id is provided
-    let finalTransactions = sortedTransactions;
-    if (user_id) {
-      try {
-        console.log('🔍 Filtering out categorized transactions for user:', user_id);
-
-        const { data: categorizedData, error } = await supabaseAdmin
-          .from('categorized_transactions')
-          .select('plaid_transaction_id')
-          .eq('user_id', user_id);
-
-        if (error) {
-          console.error('⚠️  Error fetching categorized transactions:', error);
+      if (insertError) {
+        if (insertError.code === '23505') { // Unique violation = duplicate
+          duplicateCount++;
         } else {
-          const categorizedIds = new Set(
-            categorizedData?.map(t => t.plaid_transaction_id) || []
-          );
-
-          console.log(`📋 Found ${categorizedIds.size} categorized transaction IDs in Supabase`);
-          if (categorizedIds.size > 0 && categorizedIds.size <= 10) {
-            console.log(`🔍 Categorized IDs:`, Array.from(categorizedIds));
-          }
-
-          // Pre-compute split transaction base IDs for faster lookup
-          const splitTransactionBaseIds = new Set();
-          for (const id of categorizedIds) {
-            if (id.includes('_split_')) {
-              const baseId = id.substring(0, id.indexOf('_split_'));
-              splitTransactionBaseIds.add(baseId);
-            }
-          }
-
-          // Filter uncategorized transactions
-          finalTransactions = sortedTransactions.filter(t => {
-            // Check exact match
-            if (categorizedIds.has(t.transaction_id)) return false;
-
-            // Check if this is a split transaction
-            if (splitTransactionBaseIds.has(t.transaction_id)) return false;
-
-            return true;
-          });
-
-          console.log(`✅ Filtered: ${sortedTransactions.length} total → ${finalTransactions.length} uncategorized`);
+          console.error('⚠️  Error saving transaction:', insertError);
         }
-      } catch (err) {
-        console.error('❌ Error during filtering:', err);
-        // If filtering fails, return all transactions
+      } else {
+        savedCount++;
       }
     }
+
+    console.log(`✅ Saved ${savedCount} transactions, ${duplicateCount} duplicates skipped`);
+
+    // 5. Update statement record with results
+    await supabaseAdmin
+      .from('bank_statements')
+      .update({
+        status: 'completed',
+        transaction_count: savedCount
+      })
+      .eq('id', statement.id);
 
     res.json({
-      transactions: finalTransactions,
-      count: finalTransactions.length
+      success: true,
+      statement_id: statement.id,
+      transactions_found: transactions.length,
+      transactions_saved: savedCount,
+      duplicates_skipped: duplicateCount
     });
+
   } catch (error) {
-    console.error('❌ Error syncing transactions:', error.response?.data || error);
-    res.status(500).json({
-      error: error.message,
-      details: error.response?.data
+    console.error('❌ Error uploading statement:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get list of uploaded statements for a user
+app.post('/api/get_statements', async (req, res) => {
+  try {
+    const { user_id } = req.body;
+
+    if (!user_id) {
+      return res.status(400).json({ error: 'user_id is required' });
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('bank_statements')
+      .select('*')
+      .eq('user_id', user_id)
+      .order('upload_date', { ascending: false });
+
+    if (error) throw error;
+
+    res.json(data || []);
+
+  } catch (error) {
+    console.error('❌ Error getting statements:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get uncategorized transactions for a user
+app.post('/api/get_uncategorized_transactions', async (req, res) => {
+  try {
+    const { user_id } = req.body;
+
+    if (!user_id) {
+      return res.status(400).json({ error: 'user_id is required' });
+    }
+
+    console.log('📊 Getting uncategorized transactions for user:', user_id);
+
+    // Get all uploaded transactions
+    const { data: uploaded, error: uploadedError } = await supabaseAdmin
+      .from('uploaded_transactions')
+      .select('*')
+      .eq('user_id', user_id)
+      .order('transaction_date', { ascending: false });
+
+    if (uploadedError) throw uploadedError;
+
+    console.log(`📥 Found ${uploaded?.length || 0} uploaded transactions`);
+
+    // Get categorized transaction IDs
+    const { data: categorized, error: catError } = await supabaseAdmin
+      .from('categorized_transactions')
+      .select('source_transaction_id')
+      .eq('user_id', user_id);
+
+    if (catError) throw catError;
+
+    const categorizedIds = new Set(categorized?.map(t => t.source_transaction_id) || []);
+
+    // Also check for split transactions
+    const splitBaseIds = new Set();
+    for (const id of categorizedIds) {
+      if (id && id.includes('_split_')) {
+        const baseId = id.substring(0, id.indexOf('_split_'));
+        splitBaseIds.add(baseId);
+      }
+    }
+
+    console.log(`📋 Found ${categorizedIds.size} categorized transactions`);
+
+    // Filter out already categorized
+    const uncategorized = (uploaded || []).filter(t => {
+      if (categorizedIds.has(t.id)) return false;
+      if (splitBaseIds.has(t.id)) return false;
+      return true;
     });
+
+    // Transform to match existing frontend format
+    const transactions = uncategorized.map(t => ({
+      transaction_id: t.id,
+      name: t.merchant_name,
+      merchant_name: t.merchant_name,
+      amount: parseFloat(t.amount),
+      date: t.transaction_date,
+      category: [], // No category yet
+      description: t.description
+    }));
+
+    console.log(`✅ Returning ${transactions.length} uncategorized transactions`);
+
+    res.json({
+      transactions,
+      count: transactions.length
+    });
+
+  } catch (error) {
+    console.error('❌ Error getting uncategorized transactions:', error);
+    res.status(500).json({ error: error.message });
   }
 });
 
@@ -1230,8 +1045,8 @@ app.post('/api/bulk_generate_first_questions', async (req, res) => {
       : userProfile?.tracking_goal === 'limited_company' ? 'limited company director'
       : 'self-employed (not yet registered)';
 
-    // Generate Q1 for all transactions in parallel
-    const promises = transactions.map(async (transaction) => {
+    // Helper function to generate Q1 for a single transaction
+    const generateQ1 = async (transaction) => {
       const isIncome = transaction.amount < 0;
 
       const prompt = isIncome
@@ -1319,17 +1134,34 @@ Respond with ONLY valid JSON with ONE question:
           questions: result.questions
         };
       } catch (error) {
-        console.error(`Error generating Q1 for ${transaction.name}:`, error);
+        console.error(`Error generating Q1 for ${transaction.merchant_name || transaction.name}:`, error.message);
         return {
           transaction_id: transaction.transaction_id,
           questions: null,
           error: error.message
         };
       }
-    });
+    };
 
-    const results = await Promise.all(promises);
-    console.log(`✅ Generated Q1 for ${results.filter(r => r.questions).length}/${transactions.length} transactions`);
+    // Process in batches to avoid rate limits (50 requests/min limit)
+    const BATCH_SIZE = 10; // Process 10 at a time
+    const BATCH_DELAY = 1500; // 1.5 second delay between batches
+    const results = [];
+
+    for (let i = 0; i < transactions.length; i += BATCH_SIZE) {
+      const batch = transactions.slice(i, i + BATCH_SIZE);
+      const batchPromises = batch.map(t => generateQ1(t));
+      const batchResults = await Promise.all(batchPromises);
+      results.push(...batchResults);
+
+      const successCount = results.filter(r => r.questions).length;
+      console.log(`✅ Generated Q1 for ${successCount}/${transactions.length} transactions`);
+
+      // Add delay between batches (except for the last batch)
+      if (i + BATCH_SIZE < transactions.length) {
+        await new Promise(resolve => setTimeout(resolve, BATCH_DELAY));
+      }
+    }
 
     res.json({ results });
   } catch (error) {
@@ -1987,11 +1819,11 @@ Respond with ONLY valid JSON:
           .from('categorized_transactions')
           .upsert({
             user_id: userId,
-            plaid_transaction_id: transaction.transaction_id,
+            source_transaction_id: transaction.transaction_id,
+            source_type: 'pdf_upload',
             merchant_name: transaction.merchant_name || transaction.name,
             amount: Math.abs(transaction.amount),
             transaction_date: transaction.date,
-            plaid_category: transaction.category || [],
             category_id: categorization.categoryId,
             category_name: categorization.categoryName,
             business_percent: categorization.businessPercent,
@@ -2000,7 +1832,7 @@ Respond with ONLY valid JSON:
             user_answers: {}, // Empty for bulk categorization
             rule_version: hmrcRules.metadata.version, // Track which rules were used
           }, {
-            onConflict: 'user_id,plaid_transaction_id'
+            onConflict: 'user_id,source_transaction_id'
           });
 
         if (error) {
@@ -2895,7 +2727,7 @@ const PORT = process.env.PORT || 3000;
 const HOST = '0.0.0.0'; // Listen on all network interfaces
 app.listen(PORT, HOST, () => {
   console.log(`🚀 Server running on http://${HOST}:${PORT}`);
-  console.log(`🔧 Plaid environment: ${process.env.PLAID_ENV}`);
+  console.log(`📄 PDF statement upload: enabled`);
   console.log(`🤖 AI categorization: ${process.env.ANTHROPIC_API_KEY ? 'enabled' : 'disabled'}`);
   console.log(`💾 Supabase: ${process.env.SUPABASE_URL ? 'connected' : 'not configured'}`);
 });
