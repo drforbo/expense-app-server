@@ -58,10 +58,10 @@ async function extractTransactionsFromPDF(pdfBuffer) {
     // Truncate text if too long - process in chunks if needed
     const textToProcess = pdfData.text.substring(0, 100000);
 
-    // Use Claude to parse the text content and extract transactions
+    // Use Claude Haiku for fast extraction (much faster than Sonnet)
     const message = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 16000,
+      model: "claude-3-5-haiku-20241022",
+      max_tokens: 8192,
       messages: [{
         role: "user",
         content: `You are a bank statement parser. Extract ALL individual transactions from this bank statement text.
@@ -201,24 +201,13 @@ app.post('/api/upload_statement', upload.single('pdf'), async (req, res) => {
     console.log('🤖 Extracting transactions with AI...');
     const transactions = await extractTransactionsFromPDF(file.buffer);
 
-    // 4. Save transactions with deduplication
-    let savedCount = 0;
-    let duplicateCount = 0;
-
-    for (const txn of transactions) {
-      // Validate required fields
-      if (!txn.merchant_name || txn.amount === undefined || !txn.transaction_date) {
-        console.log('⚠️  Skipping invalid transaction:', txn);
-        continue;
-      }
-
-      // Generate hash for deduplication (date + amount + merchant)
-      const hashInput = `${txn.transaction_date}_${txn.amount}_${txn.merchant_name}`.toLowerCase().trim();
-      const transactionHash = crypto.createHash('md5').update(hashInput).digest('hex');
-
-      const { error: insertError } = await supabaseAdmin
-        .from('uploaded_transactions')
-        .insert({
+    // 4. Save transactions with batch insert and deduplication
+    const validTransactions = transactions
+      .filter(txn => txn.merchant_name && txn.amount !== undefined && txn.transaction_date)
+      .map(txn => {
+        const hashInput = `${txn.transaction_date}_${txn.amount}_${txn.merchant_name}`.toLowerCase().trim();
+        const transactionHash = crypto.createHash('md5').update(hashInput).digest('hex');
+        return {
           user_id,
           statement_id: statement.id,
           merchant_name: txn.merchant_name,
@@ -226,19 +215,32 @@ app.post('/api/upload_statement', upload.single('pdf'), async (req, res) => {
           transaction_date: txn.transaction_date,
           description: txn.description || null,
           transaction_hash: transactionHash
-        });
+        };
+      });
+
+    let savedCount = 0;
+    let duplicateCount = 0;
+
+    // Batch insert in chunks of 100 for better performance
+    const BATCH_SIZE = 100;
+    for (let i = 0; i < validTransactions.length; i += BATCH_SIZE) {
+      const batch = validTransactions.slice(i, i + BATCH_SIZE);
+      const { data, error: insertError } = await supabaseAdmin
+        .from('uploaded_transactions')
+        .upsert(batch, {
+          onConflict: 'user_id,transaction_hash',
+          ignoreDuplicates: true
+        })
+        .select();
 
       if (insertError) {
-        if (insertError.code === '23505') { // Unique violation = duplicate
-          duplicateCount++;
-        } else {
-          console.error('⚠️  Error saving transaction:', insertError);
-        }
+        console.error('⚠️  Batch insert error:', insertError);
       } else {
-        savedCount++;
+        savedCount += data?.length || 0;
       }
     }
 
+    duplicateCount = validTransactions.length - savedCount;
     console.log(`✅ Saved ${savedCount} transactions, ${duplicateCount} duplicates skipped`);
 
     // 5. Update statement record with results
@@ -300,10 +302,10 @@ app.post('/api/get_uncategorized_transactions', async (req, res) => {
 
     console.log('📊 Getting uncategorized transactions for user:', user_id);
 
-    // Get all uploaded transactions
+    // Get all uploaded transactions with statement info
     const { data: uploaded, error: uploadedError } = await supabaseAdmin
       .from('uploaded_transactions')
-      .select('*')
+      .select('*, bank_statements(filename)')
       .eq('user_id', user_id)
       .order('transaction_date', { ascending: false });
 
@@ -347,7 +349,8 @@ app.post('/api/get_uncategorized_transactions', async (req, res) => {
       amount: parseFloat(t.amount),
       date: t.transaction_date,
       category: [], // No category yet
-      description: t.description
+      description: t.description,
+      statement_filename: t.bank_statements?.filename || null
     }));
 
     console.log(`✅ Returning ${transactions.length} uncategorized transactions`);
