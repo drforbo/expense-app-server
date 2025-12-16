@@ -3143,10 +3143,710 @@ Only include emails that seem relevant. Return empty array [] if none match.`;
   }
 });
 
+// ============================================
+// SMART CATEGORIZATION - MERCHANT LEARNING
+// ============================================
+
+/**
+ * Normalize merchant name for pattern matching
+ * Handles variations like "AMZN MKTP UK", "Amazon.co.uk", "AMAZON EU" -> "amazon"
+ */
+function normalizeMerchantName(name) {
+  if (!name) return '';
+
+  let normalized = name
+    .toLowerCase()
+    .trim()
+    // Remove common card transaction prefixes
+    .replace(/^(card payment to|payment to|direct debit to|standing order to)\s*/i, '')
+    // Remove reference numbers and transaction IDs
+    .replace(/\s*ref[:\s]*[\w\d]+/gi, '')
+    .replace(/\s*id[:\s]*[\w\d]+/gi, '')
+    .replace(/\s*\*+\d+/g, '')
+    // Remove dates that appear in transaction descriptions
+    .replace(/\s+\d{1,2}[\/\-]\d{1,2}([\/\-]\d{2,4})?/g, '')
+    // Remove country codes and common suffixes
+    .replace(/\s+(uk|gb|eu|com|co\.uk|ltd|limited|inc|plc|llc)\.?$/gi, '')
+    // Remove special characters except spaces
+    .replace(/[^a-z0-9\s]/g, ' ')
+    // Collapse multiple spaces
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  // Map common merchant variations to canonical names
+  const merchantAliases = {
+    'amzn': 'amazon',
+    'amzn mktp': 'amazon',
+    'amzn mktplace': 'amazon',
+    'amazon prime': 'amazon',
+    'amazonprime': 'amazon',
+    'amazon eu': 'amazon',
+    'pp': 'paypal',
+    'paypal': 'paypal',
+    'uber trip': 'uber',
+    'uber eats': 'uber eats',
+    'ubereats': 'uber eats',
+    'just eat': 'just eat',
+    'justeat': 'just eat',
+    'deliveroo': 'deliveroo',
+    'tfl': 'tfl',
+    'transport for london': 'tfl',
+    'trainline': 'trainline',
+    'the trainline': 'trainline',
+    'spotify': 'spotify',
+    'netflix': 'netflix',
+    'nflx': 'netflix',
+    'disney plus': 'disney plus',
+    'disneyplus': 'disney plus',
+    'apple': 'apple',
+    'apple com bill': 'apple',
+    'google': 'google',
+    'google play': 'google',
+    'microsoft': 'microsoft',
+    'msft': 'microsoft',
+    'adobe': 'adobe',
+    'canva': 'canva',
+    'zoom': 'zoom',
+    'dropbox': 'dropbox',
+    'tesco': 'tesco',
+    'sainsburys': 'sainsburys',
+    'sainsbury': 'sainsburys',
+    'asda': 'asda',
+    'morrisons': 'morrisons',
+    'aldi': 'aldi',
+    'lidl': 'lidl',
+    'waitrose': 'waitrose',
+    'costa': 'costa',
+    'costa coffee': 'costa',
+    'starbucks': 'starbucks',
+    'pret': 'pret a manger',
+    'pret a manger': 'pret a manger',
+    'greggs': 'greggs',
+    'mcdonalds': 'mcdonalds',
+    'mcd': 'mcdonalds',
+    'kfc': 'kfc',
+    'burger king': 'burger king',
+    'bk': 'burger king',
+    'boots': 'boots',
+    'superdrug': 'superdrug',
+  };
+
+  // Check if any alias matches (from start of string)
+  for (const [alias, canonical] of Object.entries(merchantAliases)) {
+    if (normalized === alias || normalized.startsWith(alias + ' ')) {
+      return canonical;
+    }
+  }
+
+  // Return first 2-3 words as the normalized name (handles "COSTA COFFEE LONDON" -> "costa coffee")
+  const words = normalized.split(' ').slice(0, 3).join(' ');
+  return words || normalized;
+}
+
+/**
+ * Update merchant pattern after a categorization
+ * POST /api/update_merchant_pattern
+ */
+app.post('/api/update_merchant_pattern', async (req, res) => {
+  try {
+    const { user_id, transaction, categorization, categorization_source } = req.body;
+
+    if (!user_id || !transaction || !categorization) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    const merchantName = transaction.merchant_name || transaction.name;
+    const normalizedMerchant = normalizeMerchantName(merchantName);
+    if (!normalizedMerchant) {
+      return res.json({ success: true, message: 'No merchant name to track' });
+    }
+
+    console.log(`📝 update_merchant_pattern: "${merchantName}" → normalized: "${normalizedMerchant}"`);
+
+    // Get existing pattern for this merchant
+    const { data: existingPattern, error: fetchError } = await supabaseAdmin
+      .from('merchant_patterns')
+      .select('*')
+      .eq('user_id', user_id)
+      .eq('merchant_name_normalized', normalizedMerchant)
+      .single();
+
+    const amount = Math.abs(parseFloat(transaction.amount));
+    const now = new Date().toISOString();
+
+    if (existingPattern) {
+      // Update existing pattern
+      const categoryHistory = existingPattern.category_history || [];
+      categoryHistory.push({
+        categoryId: categorization.categoryId,
+        categoryName: categorization.categoryName,
+        businessPercent: categorization.businessPercent,
+        amount: amount,
+        date: now,
+        source: categorization_source || 'manual'
+      });
+
+      // Keep last 20 categorizations for this merchant
+      const recentHistory = categoryHistory.slice(-20);
+
+      // Calculate most common category
+      const categoryCounts = {};
+      for (const entry of recentHistory) {
+        const key = `${entry.categoryId}|${entry.businessPercent}`;
+        categoryCounts[key] = (categoryCounts[key] || 0) + 1;
+      }
+      const mostCommon = Object.entries(categoryCounts)
+        .sort((a, b) => b[1] - a[1])[0];
+      const [mostCommonKey] = mostCommon;
+      const [mostCommonCategoryId, mostCommonBusinessPercent] = mostCommonKey.split('|');
+      const mostCommonEntry = recentHistory.find(e =>
+        e.categoryId === mostCommonCategoryId &&
+        e.businessPercent === parseInt(mostCommonBusinessPercent)
+      );
+
+      // Update amount statistics
+      const allAmounts = recentHistory.map(e => e.amount);
+      const avgAmount = allAmounts.reduce((a, b) => a + b, 0) / allAmounts.length;
+      const minAmount = Math.min(...allAmounts);
+      const maxAmount = Math.max(...allAmounts);
+
+      const { error: updateError } = await supabaseAdmin
+        .from('merchant_patterns')
+        .update({
+          most_common_category_id: mostCommonCategoryId,
+          most_common_category_name: mostCommonEntry?.categoryName,
+          most_common_business_percent: parseInt(mostCommonBusinessPercent),
+          typical_answers: categorization.userAnswers,
+          occurrence_count: existingPattern.occurrence_count + 1,
+          last_categorization_date: now,
+          avg_amount: avgAmount,
+          min_amount: minAmount,
+          max_amount: maxAmount,
+          category_history: recentHistory,
+          updated_at: now
+        })
+        .eq('id', existingPattern.id);
+
+      if (updateError) throw updateError;
+
+      console.log(`📊 Updated merchant pattern for "${normalizedMerchant}" (${existingPattern.occurrence_count + 1} occurrences)`);
+    } else {
+      // Create new pattern
+      const { error: insertError } = await supabaseAdmin
+        .from('merchant_patterns')
+        .insert({
+          user_id,
+          merchant_name_normalized: normalizedMerchant,
+          most_common_category_id: categorization.categoryId,
+          most_common_category_name: categorization.categoryName,
+          most_common_business_percent: categorization.businessPercent,
+          typical_answers: categorization.userAnswers,
+          occurrence_count: 1,
+          last_categorization_date: now,
+          avg_amount: amount,
+          min_amount: amount,
+          max_amount: amount,
+          category_history: [{
+            categoryId: categorization.categoryId,
+            categoryName: categorization.categoryName,
+            businessPercent: categorization.businessPercent,
+            amount: amount,
+            date: now,
+            source: categorization_source || 'manual'
+          }],
+          created_at: now,
+          updated_at: now
+        });
+
+      if (insertError) throw insertError;
+
+      console.log(`📊 Created merchant pattern for "${normalizedMerchant}"`);
+    }
+
+    res.json({ success: true, normalizedMerchant });
+
+  } catch (error) {
+    console.error('❌ Error updating merchant pattern:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * Get categorization suggestions based on merchant history
+ * POST /api/get_categorization_suggestions
+ */
+app.post('/api/get_categorization_suggestions', async (req, res) => {
+  try {
+    const { user_id, transaction } = req.body;
+
+    if (!user_id || !transaction) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    const merchantName = transaction.merchant_name || transaction.name;
+    const normalizedMerchant = normalizeMerchantName(merchantName);
+    if (!normalizedMerchant) {
+      console.log('🔍 get_suggestions: No merchant name found');
+      return res.json({ hasSuggestion: false });
+    }
+
+    console.log(`🔍 get_suggestions: "${merchantName}" → normalized: "${normalizedMerchant}"`);
+
+    // Get pattern for this merchant
+    const { data: pattern, error } = await supabaseAdmin
+      .from('merchant_patterns')
+      .select('*')
+      .eq('user_id', user_id)
+      .eq('merchant_name_normalized', normalizedMerchant)
+      .single();
+
+    if (error || !pattern) {
+      console.log(`🔍 get_suggestions: No pattern found for "${normalizedMerchant}" (error: ${error?.message || 'none'})`);
+      return res.json({ hasSuggestion: false });
+    }
+
+    console.log(`🔍 get_suggestions: Found pattern for "${normalizedMerchant}" with ${pattern.occurrence_count} occurrences`);
+
+    // Need at least 1 prior categorization to make a suggestion
+    if (pattern.occurrence_count < 1) {
+      console.log(`🔍 get_suggestions: Not enough occurrences (${pattern.occurrence_count})`);
+      return res.json({ hasSuggestion: false });
+    }
+
+    const transactionAmount = Math.abs(parseFloat(transaction.amount));
+
+    // Find the most similar past transaction by amount
+    let mostSimilar = null;
+    let smallestDiff = Infinity;
+
+    if (pattern.category_history && pattern.category_history.length > 0) {
+      for (const entry of pattern.category_history) {
+        const diff = Math.abs(entry.amount - transactionAmount);
+        if (diff < smallestDiff) {
+          smallestDiff = diff;
+          mostSimilar = entry;
+        }
+      }
+    }
+
+    // Calculate confidence based on:
+    // 1. How many times we've categorized this merchant
+    // 2. How similar the amount is to past transactions
+    // 3. How consistent the categorization has been
+
+    const occurrenceConfidence = Math.min(pattern.occurrence_count / 5, 1); // Max at 5 occurrences
+
+    const amountRange = pattern.max_amount - pattern.min_amount;
+    const amountConfidence = amountRange > 0
+      ? Math.max(0, 1 - (smallestDiff / amountRange))
+      : (smallestDiff < 5 ? 1 : 0.5); // If all amounts same, high confidence if close
+
+    // Check category consistency
+    const categoryHistory = pattern.category_history || [];
+    const uniqueCategories = new Set(categoryHistory.map(e => e.categoryId));
+    const consistencyConfidence = uniqueCategories.size === 1 ? 1 : 0.7;
+
+    const overallConfidence = (occurrenceConfidence * 0.3 + amountConfidence * 0.3 + consistencyConfidence * 0.4);
+
+    // Build suggestion message
+    const formattedDate = mostSimilar?.date
+      ? new Date(mostSimilar.date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })
+      : null;
+    const formattedAmount = mostSimilar?.amount
+      ? `£${mostSimilar.amount.toFixed(2)}`
+      : null;
+
+    const businessPercentText = pattern.most_common_business_percent === 100
+      ? '100% business'
+      : pattern.most_common_business_percent === 0
+        ? 'Personal'
+        : `${pattern.most_common_business_percent}% business`;
+
+    let message = `You've categorized ${transaction.merchant_name} purchases as "${pattern.most_common_category_name}" (${businessPercentText})`;
+    if (formattedAmount && formattedDate) {
+      message += ` - similar: ${formattedAmount} on ${formattedDate}`;
+    }
+
+    res.json({
+      hasSuggestion: true,
+      suggestion: {
+        type: 'merchant_history',
+        message,
+        normalizedMerchant,
+        similarTransaction: mostSimilar ? {
+          amount: mostSimilar.amount,
+          date: mostSimilar.date,
+          categoryId: mostSimilar.categoryId,
+          categoryName: mostSimilar.categoryName,
+          businessPercent: mostSimilar.businessPercent
+        } : null,
+        suggestedCategoryId: pattern.most_common_category_id,
+        suggestedCategoryName: pattern.most_common_category_name,
+        suggestedBusinessPercent: pattern.most_common_business_percent,
+        typicalAnswers: pattern.typical_answers,
+        confidence: overallConfidence,
+        occurrenceCount: pattern.occurrence_count,
+        // Flag if this merchant has variable categorizations
+        isVariable: uniqueCategories.size > 1
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error getting categorization suggestions:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// SUBSCRIPTION DETECTION
+// ============================================
+
+/**
+ * Detect subscription patterns from uncategorized transactions
+ * POST /api/detect_subscriptions
+ */
+app.post('/api/detect_subscriptions', async (req, res) => {
+  try {
+    const { user_id } = req.body;
+
+    if (!user_id) {
+      return res.status(400).json({ error: 'Missing user_id' });
+    }
+
+    console.log('🔄 Detecting subscriptions for user:', user_id);
+
+    // Get all uploaded transactions (not yet categorized)
+    const { data: allTransactions, error: txnError } = await supabaseAdmin
+      .from('transactions')
+      .select('*')
+      .eq('user_id', user_id)
+      .order('transaction_date', { ascending: true });
+
+    if (txnError) throw txnError;
+
+    // Get already categorized transaction IDs
+    const { data: categorized, error: catError } = await supabaseAdmin
+      .from('categorized_transactions')
+      .select('source_transaction_id')
+      .eq('user_id', user_id);
+
+    if (catError) throw catError;
+
+    const categorizedIds = new Set(categorized?.map(c => c.source_transaction_id) || []);
+
+    // Get existing subscription patterns (to avoid re-detecting)
+    const { data: existingPatterns, error: patternError } = await supabaseAdmin
+      .from('subscription_patterns')
+      .select('merchant_name_normalized, amount')
+      .eq('user_id', user_id);
+
+    if (patternError && patternError.code !== 'PGRST116') throw patternError;
+
+    const existingPatternKeys = new Set(
+      (existingPatterns || []).map(p => `${p.merchant_name_normalized}|${p.amount}`)
+    );
+
+    // Filter to uncategorized transactions only
+    const uncategorized = allTransactions?.filter(t => !categorizedIds.has(t.transaction_id)) || [];
+
+    // Group transactions by normalized merchant + amount (with tolerance)
+    const groups = new Map();
+    const AMOUNT_TOLERANCE = 0.50; // 50p tolerance
+
+    for (const txn of uncategorized) {
+      const merchantName = txn.merchant_name || txn.name || 'Unknown';
+      const normalizedMerchant = normalizeMerchantName(merchantName);
+      const amount = Math.abs(parseFloat(txn.amount)).toFixed(2);
+
+      // Find existing group with similar amount
+      let foundGroup = false;
+      for (const [key, group] of groups.entries()) {
+        const [groupMerchant, groupAmount] = key.split('|');
+        if (groupMerchant === normalizedMerchant) {
+          const amountDiff = Math.abs(parseFloat(amount) - parseFloat(groupAmount));
+          if (amountDiff <= AMOUNT_TOLERANCE) {
+            group.transactions.push(txn);
+            foundGroup = true;
+            break;
+          }
+        }
+      }
+
+      if (!foundGroup) {
+        const key = `${normalizedMerchant}|${amount}`;
+        groups.set(key, {
+          merchantNormalized: normalizedMerchant,
+          merchantDisplay: merchantName,
+          amount: parseFloat(amount),
+          transactions: [txn]
+        });
+      }
+    }
+
+    // Analyze each group for subscription patterns
+    const detectedSubscriptions = [];
+
+    for (const [key, group] of groups.entries()) {
+      // Need at least 3 occurrences to detect a pattern
+      if (group.transactions.length < 3) continue;
+
+      // Skip if already detected
+      const patternKey = `${group.merchantNormalized}|${group.amount.toFixed(2)}`;
+      if (existingPatternKeys.has(patternKey)) continue;
+
+      // Sort by date
+      const sorted = group.transactions.sort(
+        (a, b) => new Date(a.transaction_date).getTime() - new Date(b.transaction_date).getTime()
+      );
+
+      // Calculate intervals between transactions
+      const intervals = [];
+      for (let i = 1; i < sorted.length; i++) {
+        const days = Math.round(
+          (new Date(sorted[i].transaction_date).getTime() - new Date(sorted[i-1].transaction_date).getTime())
+          / (1000 * 60 * 60 * 24)
+        );
+        intervals.push(days);
+      }
+
+      // Determine frequency based on average interval
+      const avgInterval = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+      let frequency = null;
+      let confidence = 0;
+
+      // Calculate standard deviation for consistency scoring
+      const variance = intervals.reduce((sum, val) => sum + Math.pow(val - avgInterval, 2), 0) / intervals.length;
+      const stdDev = Math.sqrt(variance);
+      const consistencyScore = Math.max(0, 1 - (stdDev / avgInterval));
+
+      if (avgInterval >= 5 && avgInterval <= 9) {
+        frequency = 'weekly';
+        confidence = consistencyScore * 0.9;
+      } else if (avgInterval >= 25 && avgInterval <= 35) {
+        frequency = 'monthly';
+        confidence = consistencyScore * 0.95;
+      } else if (avgInterval >= 350 && avgInterval <= 380) {
+        frequency = 'yearly';
+        confidence = consistencyScore * 0.85;
+      }
+
+      // Only include if we detected a valid frequency with decent confidence
+      if (frequency && confidence >= 0.5) {
+        const lastTxn = sorted[sorted.length - 1];
+        const lastChargeDate = new Date(lastTxn.transaction_date);
+
+        // Calculate next expected date
+        let nextExpectedDate = new Date(lastChargeDate);
+        if (frequency === 'weekly') nextExpectedDate.setDate(nextExpectedDate.getDate() + 7);
+        else if (frequency === 'monthly') nextExpectedDate.setMonth(nextExpectedDate.getMonth() + 1);
+        else if (frequency === 'yearly') nextExpectedDate.setFullYear(nextExpectedDate.getFullYear() + 1);
+
+        detectedSubscriptions.push({
+          merchantNormalized: group.merchantNormalized,
+          merchantDisplay: group.merchantDisplay,
+          amount: group.amount,
+          frequency,
+          avgIntervalDays: Math.round(avgInterval),
+          confidence: Math.round(confidence * 100) / 100,
+          transactionCount: sorted.length,
+          transactions: sorted.map(t => ({
+            id: t.transaction_id,
+            date: t.transaction_date,
+            amount: Math.abs(parseFloat(t.amount))
+          })),
+          lastChargeDate: lastChargeDate.toISOString().split('T')[0],
+          nextExpectedDate: nextExpectedDate.toISOString().split('T')[0]
+        });
+      }
+    }
+
+    // Sort by confidence (highest first)
+    detectedSubscriptions.sort((a, b) => b.confidence - a.confidence);
+
+    console.log(`✅ Detected ${detectedSubscriptions.length} subscription patterns`);
+
+    res.json({
+      success: true,
+      subscriptions: detectedSubscriptions,
+      totalDetected: detectedSubscriptions.length
+    });
+
+  } catch (error) {
+    console.error('❌ Error detecting subscriptions:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * Confirm a subscription pattern and categorize all matching transactions
+ * POST /api/confirm_subscription
+ */
+app.post('/api/confirm_subscription', async (req, res) => {
+  try {
+    const {
+      user_id,
+      subscription,
+      category_id,
+      category_name,
+      business_percent,
+      apply_to_past = true
+    } = req.body;
+
+    if (!user_id || !subscription || !category_id) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    console.log(`✅ Confirming subscription: ${subscription.merchantDisplay} @ £${subscription.amount}`);
+
+    // Save the subscription pattern
+    const { data: pattern, error: insertError } = await supabaseAdmin
+      .from('subscription_patterns')
+      .upsert({
+        user_id,
+        merchant_name_normalized: subscription.merchantNormalized,
+        merchant_name_display: subscription.merchantDisplay,
+        amount: subscription.amount,
+        frequency: subscription.frequency,
+        avg_interval_days: subscription.avgIntervalDays,
+        confidence_score: subscription.confidence,
+        status: 'confirmed',
+        category_id,
+        category_name,
+        business_percent: business_percent || 0,
+        matched_transaction_ids: subscription.transactions.map(t => t.id),
+        transaction_count: subscription.transactionCount,
+        last_charge_date: subscription.lastChargeDate,
+        next_expected_date: subscription.nextExpectedDate,
+        confirmed_at: new Date().toISOString()
+      }, {
+        onConflict: 'user_id,merchant_name_normalized,amount'
+      })
+      .select()
+      .single();
+
+    if (insertError) throw insertError;
+
+    // Categorize all matching past transactions
+    let categorizedCount = 0;
+    if (apply_to_past && subscription.transactions?.length > 0) {
+      for (const txn of subscription.transactions) {
+        const { error: catError } = await supabaseAdmin
+          .from('categorized_transactions')
+          .upsert({
+            user_id,
+            source_transaction_id: txn.id,
+            source_type: 'pdf_upload',
+            merchant_name: subscription.merchantDisplay,
+            amount: txn.amount,
+            transaction_date: txn.date,
+            category_id,
+            category_name,
+            business_percent: business_percent || 0,
+            explanation: `Auto-categorized as ${subscription.frequency} subscription`,
+            tax_deductible: (business_percent || 0) > 0,
+            user_answers: {},
+            transaction_type: 'expense',
+            categorization_source: 'subscription_auto'
+          }, {
+            onConflict: 'user_id,source_transaction_id'
+          });
+
+        if (!catError) categorizedCount++;
+      }
+    }
+
+    console.log(`✅ Categorized ${categorizedCount} transactions as subscription`);
+
+    res.json({
+      success: true,
+      pattern,
+      categorizedCount
+    });
+
+  } catch (error) {
+    console.error('❌ Error confirming subscription:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * Reject a subscription pattern (don't show again)
+ * POST /api/reject_subscription
+ */
+app.post('/api/reject_subscription', async (req, res) => {
+  try {
+    const { user_id, subscription } = req.body;
+
+    if (!user_id || !subscription) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    // Save as rejected so we don't detect it again
+    const { error } = await supabaseAdmin
+      .from('subscription_patterns')
+      .upsert({
+        user_id,
+        merchant_name_normalized: subscription.merchantNormalized,
+        merchant_name_display: subscription.merchantDisplay,
+        amount: subscription.amount,
+        frequency: subscription.frequency,
+        avg_interval_days: subscription.avgIntervalDays,
+        confidence_score: subscription.confidence,
+        status: 'rejected',
+        matched_transaction_ids: subscription.transactions.map(t => t.id),
+        transaction_count: subscription.transactionCount
+      }, {
+        onConflict: 'user_id,merchant_name_normalized,amount'
+      });
+
+    if (error) throw error;
+
+    console.log(`❌ Rejected subscription: ${subscription.merchantDisplay}`);
+
+    res.json({ success: true });
+
+  } catch (error) {
+    console.error('❌ Error rejecting subscription:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * Get confirmed subscriptions for auto-categorization of new transactions
+ * POST /api/get_confirmed_subscriptions
+ */
+app.post('/api/get_confirmed_subscriptions', async (req, res) => {
+  try {
+    const { user_id } = req.body;
+
+    if (!user_id) {
+      return res.status(400).json({ error: 'Missing user_id' });
+    }
+
+    const { data: patterns, error } = await supabaseAdmin
+      .from('subscription_patterns')
+      .select('*')
+      .eq('user_id', user_id)
+      .eq('status', 'confirmed');
+
+    if (error) throw error;
+
+    res.json({
+      success: true,
+      subscriptions: patterns || []
+    });
+
+  } catch (error) {
+    console.error('❌ Error getting confirmed subscriptions:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 const HOST = '0.0.0.0'; // Listen on all network interfaces
 app.listen(PORT, HOST, () => {
   console.log(`🚀 Server running on http://${HOST}:${PORT}`);
+  console.log(`📊 Smart categorization: enabled`);
   console.log(`📄 PDF statement upload: enabled`);
   console.log(`🤖 AI categorization: ${process.env.ANTHROPIC_API_KEY ? 'enabled' : 'disabled'}`);
   console.log(`💾 Supabase: ${process.env.SUPABASE_URL ? 'connected' : 'not configured'}`);
