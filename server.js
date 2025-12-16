@@ -5,7 +5,15 @@ const { createClient } = require('@supabase/supabase-js');
 const crypto = require('crypto');
 const multer = require('multer');
 const pdfParse = require('pdf-parse');
+const { google } = require('googleapis');
 require('dotenv').config();
+
+// Initialize Google OAuth2 client
+const oauth2Client = new google.auth.OAuth2(
+  process.env.GOOGLE_CLIENT_ID,
+  process.env.GOOGLE_CLIENT_SECRET,
+  'http://localhost:3000/auth/google/callback'
+);
 
 const app = express();
 app.use(cors());
@@ -45,95 +53,131 @@ const supabaseAdmin = createClient(
 // PDF BANK STATEMENT UPLOAD & TRANSACTION EXTRACTION
 // ============================================
 
-// Helper function to extract transactions from PDF using Claude
-async function extractTransactionsFromPDF(pdfBuffer) {
-  try {
-    // Extract text from PDF
-    const pdfData = await pdfParse(pdfBuffer);
-    const pageCount = pdfData.numpages;
-
-    console.log(`📄 Processing PDF with ${pageCount} pages`);
-    console.log(`📝 Extracted ${pdfData.text.length} characters of text`);
-
-    // Truncate text if too long - process in chunks if needed
-    const textToProcess = pdfData.text.substring(0, 100000);
-
-    // Use Claude Haiku for fast extraction (much faster than Sonnet)
-    const message = await anthropic.messages.create({
-      model: "claude-3-5-haiku-20241022",
-      max_tokens: 8192,
-      messages: [{
-        role: "user",
-        content: `You are a bank statement parser. Extract ALL individual transactions from this bank statement text.
+// Helper function to extract transactions from a chunk of PDF text using Claude
+async function extractTransactionsFromChunk(textChunk, chunkIndex, totalChunks) {
+  const message = await anthropic.messages.create({
+    model: "claude-3-5-haiku-20241022",
+    max_tokens: 8192, // Max for Haiku
+    messages: [{
+      role: "user",
+      content: `You are a bank statement parser. Extract ALL individual transactions from this bank statement text.
 
 IMPORTANT RULES:
-1. Extract EVERY transaction you can find - do not skip any
+1. Extract EVERY SINGLE transaction you find - do not skip any, do not summarize
 2. For amount: Use POSITIVE numbers for money going OUT (debits/expenses/purchases), NEGATIVE numbers for money coming IN (credits/income/deposits)
-3. For dates: Convert to YYYY-MM-DD format
+3. For dates: Convert to YYYY-MM-DD format. If year is missing, assume current year or most recent past year
 4. For merchant_name: Clean up the name - remove card numbers, reference codes, and extract the actual merchant/payee name
-5. Skip balance entries, opening balances, closing balances - only include actual transactions
-6. Look for patterns like dates followed by descriptions and amounts
+5. Skip ONLY: balance entries, opening balances, closing balances, statement headers
+6. Include ALL: purchases, payments, transfers, direct debits, standing orders, card payments, ATM withdrawals
 7. Common UK bank formats: "DD MMM" or "DD/MM/YYYY" dates, amounts with £ symbol
 
+This is chunk ${chunkIndex + 1} of ${totalChunks} from a larger statement. Extract ALL transactions from this chunk.
+
 BANK STATEMENT TEXT:
-${textToProcess}
+${textChunk}
 
 You MUST respond with ONLY a valid JSON array. No explanation, no markdown, just the raw JSON array starting with [ and ending with ].
 
 Format:
 [{"merchant_name": "Tesco", "amount": 45.23, "transaction_date": "2024-01-15", "description": "Original transaction text"}]
 
-If no transactions found, respond with exactly: []`
-      }]
-    });
+If no transactions found in this chunk, respond with exactly: []`
+    }]
+  });
 
-    let responseText = message.content[0].text;
-    console.log(`🤖 Claude response length: ${responseText.length} chars`);
-    console.log(`🤖 First 500 chars: ${responseText.substring(0, 500)}`);
-    console.log(`🤖 Last 200 chars: ${responseText.substring(responseText.length - 200)}`);
+  let responseText = message.content[0].text;
 
-    // Clean up the response - remove markdown code blocks if present
-    responseText = responseText.replace(/```json\n?/gi, '').replace(/```\n?/g, '').trim();
+  // Clean up the response - remove markdown code blocks if present
+  responseText = responseText.replace(/```json\n?/gi, '').replace(/```\n?/g, '').trim();
 
-    // Check if the response was truncated (starts with [ but doesn't end with ])
-    if (responseText.startsWith('[') && !responseText.trim().endsWith(']')) {
-      console.log('⚠️ Response appears truncated, attempting to fix...');
-      // Find the last complete JSON object and close the array
-      const lastCompleteObject = responseText.lastIndexOf('},');
-      if (lastCompleteObject > 0) {
-        responseText = responseText.substring(0, lastCompleteObject + 1) + ']';
-        console.log(`✅ Fixed truncated response, cut at position ${lastCompleteObject}`);
-      } else {
-        // Try to find a single complete object
-        const lastBrace = responseText.lastIndexOf('}');
-        if (lastBrace > 0) {
-          responseText = responseText.substring(0, lastBrace + 1) + ']';
-          console.log(`✅ Fixed truncated response with single object fix`);
-        }
+  // Check if the response was truncated (starts with [ but doesn't end with ])
+  if (responseText.startsWith('[') && !responseText.trim().endsWith(']')) {
+    console.log(`⚠️ Chunk ${chunkIndex + 1} response truncated, attempting to fix...`);
+    const lastCompleteObject = responseText.lastIndexOf('},');
+    if (lastCompleteObject > 0) {
+      responseText = responseText.substring(0, lastCompleteObject + 1) + ']';
+    } else {
+      const lastBrace = responseText.lastIndexOf('}');
+      if (lastBrace > 0) {
+        responseText = responseText.substring(0, lastBrace + 1) + ']';
       }
     }
+  }
 
-    // Find the JSON array in the response - greedy match to get full array
-    const jsonMatch = responseText.match(/\[[\s\S]*\]/);
-    if (!jsonMatch) {
-      console.error('❌ No JSON array found in response');
-      console.error('❌ Full response:', responseText.substring(0, 2000));
-      return [];
+  // Find the JSON array in the response
+  const jsonMatch = responseText.match(/\[[\s\S]*\]/);
+  if (!jsonMatch) {
+    console.error(`❌ No JSON array found in chunk ${chunkIndex + 1} response`);
+    return [];
+  }
+
+  try {
+    return JSON.parse(jsonMatch[0]);
+  } catch (parseError) {
+    console.error(`❌ JSON parse error in chunk ${chunkIndex + 1}:`, parseError.message);
+    return [];
+  }
+}
+
+// Helper function to extract transactions from PDF using Claude with chunking
+async function extractTransactionsFromPDF(pdfBuffer) {
+  try {
+    // Extract text from PDF
+    const pdfData = await pdfParse(pdfBuffer);
+    const pageCount = pdfData.numpages;
+    const fullText = pdfData.text;
+
+    console.log(`📄 Processing PDF with ${pageCount} pages`);
+    console.log(`📝 Extracted ${fullText.length} characters of text`);
+
+    // Split text into chunks to handle large PDFs
+    // Each chunk should be small enough that 8192 output tokens can handle all transactions
+    // ~100 chars per transaction JSON, 8192 tokens ~= 6000 chars output, so ~60 transactions max per chunk
+    // Bank statements average ~200-300 chars per transaction in source text
+    const CHUNK_SIZE = 8000; // Characters per chunk (smaller to ensure output fits in 8192 tokens)
+    const OVERLAP = 300; // Overlap between chunks to avoid missing transactions at boundaries
+
+    const chunks = [];
+    for (let i = 0; i < fullText.length; i += CHUNK_SIZE - OVERLAP) {
+      chunks.push(fullText.substring(i, i + CHUNK_SIZE));
     }
 
-    let transactions;
-    try {
-      transactions = JSON.parse(jsonMatch[0]);
-    } catch (parseError) {
-      console.error('❌ JSON parse error:', parseError.message);
-      console.error('❌ Attempted to parse (first 1000 chars):', jsonMatch[0].substring(0, 1000));
-      console.error('❌ Attempted to parse (last 500 chars):', jsonMatch[0].substring(jsonMatch[0].length - 500));
-      return [];
+    console.log(`📦 Split into ${chunks.length} chunks for processing`);
+
+    // Process chunks in parallel (max 3 at a time to avoid rate limits)
+    const PARALLEL_LIMIT = 3;
+    let allTransactions = [];
+
+    for (let i = 0; i < chunks.length; i += PARALLEL_LIMIT) {
+      const chunkBatch = chunks.slice(i, i + PARALLEL_LIMIT);
+      const promises = chunkBatch.map((chunk, idx) =>
+        extractTransactionsFromChunk(chunk, i + idx, chunks.length)
+      );
+
+      const results = await Promise.all(promises);
+      for (const transactions of results) {
+        allTransactions = allTransactions.concat(transactions);
+      }
+
+      console.log(`✅ Processed chunks ${i + 1}-${Math.min(i + PARALLEL_LIMIT, chunks.length)} of ${chunks.length}`);
     }
 
-    console.log(`✅ Extracted ${transactions.length} transactions from PDF`);
+    console.log(`📊 Total transactions extracted before dedup: ${allTransactions.length}`);
 
-    return transactions;
+    // Deduplicate transactions that might appear in overlapping chunks
+    const seen = new Set();
+    const uniqueTransactions = allTransactions.filter(txn => {
+      const key = `${txn.transaction_date}_${txn.amount}_${txn.merchant_name}`.toLowerCase().trim();
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    });
+
+    console.log(`✅ Extracted ${uniqueTransactions.length} unique transactions from PDF (removed ${allTransactions.length - uniqueTransactions.length} duplicates from chunk overlap)`);
+
+    return uniqueTransactions;
   } catch (error) {
     console.error('❌ Error extracting transactions from PDF:', error);
     throw error;
@@ -389,7 +433,7 @@ app.post('/api/generate_questions', async (req, res) => {
 
     // INCOME FLOW - Different questions for income categorization
     if (isIncome) {
-      // CRITICAL: Check for personal income keywords in Q1 answer BEFORE calling AI
+      // CRITICAL: Check for personal income or employment keywords in Q1 answer BEFORE calling AI
       if (numAnswered === 1) {
         const q1Answer = Object.values(previousAnswers)[0]?.toLowerCase() || '';
         const personalKeywords = [
@@ -399,11 +443,26 @@ app.post('/api/generate_questions', async (req, res) => {
           'repaying', 'split', 'share', 'shared'
         ];
 
+        // Employment/PAYE salary keywords - these don't need further categorization
+        const employmentKeywords = [
+          'salary', 'paye', 'wages', 'payroll', 'employer', 'employment',
+          'monthly pay', 'weekly pay', 'job', 'work salary', 'my employer',
+          'employed', 'employee'
+        ];
+
         const isPersonalIncome = personalKeywords.some(keyword => q1Answer.includes(keyword));
+        const isEmploymentIncome = employmentKeywords.some(keyword => q1Answer.includes(keyword));
 
         if (isPersonalIncome) {
           console.log('🏠 Personal income detected in Q1:', q1Answer);
           console.log('✅ Skipping Q2 - ready to categorize as personal income');
+          res.json({ questions: [] });
+          return;
+        }
+
+        if (isEmploymentIncome) {
+          console.log('💼 Employment income detected in Q1:', q1Answer);
+          console.log('✅ Skipping Q2 - ready to categorize as PAYE employment income');
           res.json({ questions: [] });
           return;
         }
@@ -502,26 +561,32 @@ YOUR GOAL: Check if Q1 indicates PERSONAL or BUSINESS income.
 
 STEP 1: Analyze the Q1 answer carefully.
 
-PERSONAL INCOME indicators (stop asking questions - return empty array):
+PERSONAL/NON-BUSINESS INCOME indicators (stop asking questions - return empty array):
 - Contains words: "friend", "family", "paying me back", "paying back", "reimbursement", "reimburse"
 - Contains words: "gift", "personal transfer", "personal", "dinner", "lunch", "expense"
 - Contains words: "borrowed", "owe", "owed", "repay", "repaying"
 - Describes a non-business personal transaction
 
-BUSINESS INCOME indicators (ask Q2):
+EMPLOYMENT INCOME indicators (stop asking questions - return empty array):
+- Contains words: "salary", "PAYE", "wages", "payroll", "employer", "employment"
+- Contains words: "monthly pay", "weekly pay", "job", "work salary"
+- Regular employment from an employer (already taxed at source via PAYE)
+- This is NOT self-employment income - it's standard employment
+
+BUSINESS/SELF-EMPLOYMENT INCOME indicators (ask Q2):
 - Client payments, sponsorships, brand deals
 - Platform revenue (YouTube, TikTok, etc.)
 - Sales, commissions, fees
-- Any work-related income
+- Freelance or self-employment income
 
 STEP 2: Decide what to return.
 
-If PERSONAL INCOME detected in Q1:
+If PERSONAL INCOME or EMPLOYMENT INCOME detected in Q1:
 {
   "questions": []
 }
 
-If BUSINESS INCOME detected in Q1:
+If BUSINESS/SELF-EMPLOYMENT INCOME detected in Q1:
 {
   "questions": [
     {
@@ -631,8 +696,10 @@ IMPORTANT RULES:
   * "Personal transfer"
   * "Gift"
   * "Reimbursement"
+- If the amount looks like a regular salary (e.g., round numbers like £1500-£6000, or from company names), include:
+  * "PAYE salary from my employer"
 - Include common business income for ${workTypeDesc}
-- Provide exactly 4 options
+- Provide exactly 4-5 options
 
 Respond with ONLY valid JSON:
 {
@@ -1076,8 +1143,10 @@ IMPORTANT RULES:
   * "Personal transfer"
   * "Gift"
   * "Reimbursement"
+- If the amount looks like a regular salary (e.g., round numbers like £1500-£6000, or from company names), include:
+  * "PAYE salary from my employer"
 - Include common business income for ${workTypeDesc}
-- Provide exactly 4 options
+- Provide exactly 4-5 options
 
 Respond with ONLY valid JSON:
 {
@@ -1214,6 +1283,7 @@ app.post('/api/categorize_from_answers', async (req, res) => {
 - affiliate_income: Affiliate commissions, referral income
 - client_fees: Client work, consulting, freelance projects
 - sales_income: Product sales, merchandise, digital products
+- employment_income: PAYE salary from an employer (already taxed at source)
 - other_income: Other business income`;
 
     // INCOME CATEGORIZATION
@@ -1248,7 +1318,14 @@ HMRC TAX RULES FOR INCOME:
    - Personal transfers
    → businessPercent: 0, taxDeductible: false, categoryId: "personal"
 
-   BUSINESS INCOME (taxable):
+   EMPLOYMENT INCOME (PAYE salary - already taxed at source):
+   - Salary/wages from an employer
+   - PAYE income
+   - Regular employment pay
+   → businessPercent: 100, taxDeductible: false, categoryId: "employment_income"
+   Note: This is NOT self-employment income. Tax is already deducted via PAYE.
+
+   BUSINESS/SELF-EMPLOYMENT INCOME (taxable):
    - Client payments, sponsorships, platform revenue, sales
    - Anything earned through self-employment
    → businessPercent: 100, taxDeductible: true, use appropriate business category
@@ -1259,6 +1336,7 @@ HMRC TAX RULES FOR INCOME:
    - Affiliate commissions → affiliate_income
    - Client work/consulting → client_fees
    - Product/merchandise sales → sales_income
+   - PAYE salary from employer → employment_income
    - Everything else → other_income
 
 3. **Foreign Income:**
@@ -1276,9 +1354,13 @@ DECISION PROCESS:
 2. Check for PERSONAL INCOME keywords:
    - "friend", "family", "paying me back", "paying back", "reimbursement"
    - "gift", "personal transfer", "personal", "dinner", "expense"
-3. If personal keywords found → businessPercent: 0, taxDeductible: false, categoryId: "personal"
-4. If business income → Read Q2 (if exists) and match to business category
-5. Business income → businessPercent: 100, taxDeductible: true
+3. Check for EMPLOYMENT/PAYE INCOME keywords:
+   - "salary", "paye", "wages", "employer", "employment", "payroll"
+   - "monthly pay", "weekly pay", "my employer", "employee"
+4. If personal keywords found → businessPercent: 0, taxDeductible: false, categoryId: "personal"
+5. If employment keywords found → businessPercent: 100, taxDeductible: false, categoryId: "employment_income"
+6. If business/self-employment income → Read Q2 (if exists) and match to business category
+7. Business income → businessPercent: 100, taxDeductible: true
 
 EXAMPLES:
 
@@ -1295,7 +1377,17 @@ Q1: "Gift or personal transfer"
 Q1: "Personal reimbursement"
 → categoryId: "personal", categoryName: "Personal Income", businessPercent: 0, taxDeductible: false, explanation: "Personal reimbursement - not business income"
 
-BUSINESS INCOME (taxable):
+EMPLOYMENT INCOME (PAYE - already taxed):
+Q1: "PAYE salary from my employer"
+→ categoryId: "employment_income", categoryName: "Employment Income", businessPercent: 100, taxDeductible: false, explanation: "PAYE salary - tax already deducted at source by your employer"
+
+Q1: "Salary from employer"
+→ categoryId: "employment_income", categoryName: "Employment Income", businessPercent: 100, taxDeductible: false, explanation: "Employment salary - already taxed via PAYE"
+
+Q1: "Monthly wages"
+→ categoryId: "employment_income", categoryName: "Employment Income", businessPercent: 100, taxDeductible: false, explanation: "Employment wages - tax deducted at source"
+
+BUSINESS INCOME (taxable - self-employment):
 Q1: "YouTube/Google ad revenue" Q2: "Ad revenue (YouTube, TikTok, etc.)"
 → categoryId: "ad_revenue", categoryName: "Ad Revenue", businessPercent: 100, taxDeductible: true, explanation: "YouTube ad revenue - 100% taxable business income"
 
@@ -1317,7 +1409,14 @@ FOR PERSONAL INCOME (friends, gifts, reimbursements):
 - categoryName: "Personal Income"
 - Explanation: Mention it's personal/not taxable
 
-FOR BUSINESS INCOME (earned income):
+FOR EMPLOYMENT INCOME (PAYE salary, wages):
+- businessPercent: 100
+- taxDeductible: false
+- categoryId: "employment_income"
+- categoryName: "Employment Income"
+- Explanation: Mention it's already taxed via PAYE
+
+FOR BUSINESS/SELF-EMPLOYMENT INCOME (earned income):
 - businessPercent: 100
 - taxDeductible: true
 - categoryId: appropriate business category (sponsorship_income, ad_revenue, etc.)
@@ -1327,7 +1426,9 @@ FOR BUSINESS INCOME (earned income):
 CRITICAL VALIDATION:
 1. Did user say "friend", "paying back", "gift", "personal", "reimbursement"?
    → If YES: businessPercent: 0, taxDeductible: false, categoryId: "personal"
-2. Is this earned business income?
+2. Did user say "salary", "paye", "wages", "employer", "employment"?
+   → If YES: businessPercent: 100, taxDeductible: false, categoryId: "employment_income"
+3. Is this earned self-employment/business income?
    → If YES: businessPercent: 100, taxDeductible: true, use business category
 
 CRITICAL: Respond with ONLY valid JSON. No explanatory text. Just pure JSON starting with { and ending with }.
@@ -1341,7 +1442,16 @@ FOR PERSONAL INCOME:
   "taxDeductible": false
 }
 
-FOR BUSINESS INCOME:
+FOR EMPLOYMENT INCOME:
+{
+  "categoryId": "employment_income",
+  "categoryName": "Employment Income",
+  "businessPercent": 100,
+  "explanation": "PAYE salary - tax already deducted at source by your employer",
+  "taxDeductible": false
+}
+
+FOR BUSINESS/SELF-EMPLOYMENT INCOME:
 {
   "categoryId": "one of the business income category IDs",
   "categoryName": "friendly display name (e.g., Sponsorship Income, Ad Revenue)",
@@ -2441,6 +2551,7 @@ app.get('/api/download_transactions', async (req, res) => {
       'Type',
       'HMRC Category',
       'Tax Deductible',
+      'Has Evidence',
       'Notes',
       'User Answers'
     ];
@@ -2463,6 +2574,7 @@ app.get('/api/download_transactions', async (req, res) => {
         txn.transaction_type || 'Expense',
         `"${(txn.category_name || 'Uncategorized').replace(/"/g, '""')}"`,
         txn.tax_deductible ? 'Yes' : 'No',
+        txn.qualified ? 'Yes' : 'No',
         `"${(txn.explanation || '').replace(/"/g, '""')}"`,
         `"${formatUserAnswers(txn.user_answers)}"`
       ].join(',');
@@ -2482,6 +2594,7 @@ app.get('/api/download_transactions', async (req, res) => {
         'Income (Gifted)',
         '"Gifts/PR Packages"',
         'Taxable',
+        'Yes', // Gifted items are always considered to have evidence (they're explicitly tracked)
         `"Item: ${(item.item_name || 'N/A').replace(/"/g, '""')}, From: ${(item.received_from || 'N/A').replace(/"/g, '""')}, Reason: ${(item.reason || 'N/A').replace(/"/g, '""')}"`,
         '""' // Empty User Answers for gifted items
       ].join(',');
@@ -2726,6 +2839,310 @@ app.post('/api/delete_gifted_item', async (req, res) => {
   }
 });
 
+// ============================================
+// GMAIL INTEGRATION - EMAIL MEMORY JOGGER
+// ============================================
+
+// Exchange authorization code for tokens and save connection
+app.post('/api/gmail/connect', async (req, res) => {
+  try {
+    const { code, userId } = req.body;
+
+    if (!code || !userId) {
+      return res.status(400).json({ error: 'Missing code or userId' });
+    }
+
+    console.log('🔐 Exchanging Gmail auth code for tokens...');
+
+    // Exchange the code for tokens
+    const { tokens } = await oauth2Client.getToken(code);
+    oauth2Client.setCredentials(tokens);
+
+    // Get user's email address
+    const oauth2 = google.oauth2({ version: 'v2', auth: oauth2Client });
+    const userInfo = await oauth2.userinfo.get();
+    const email = userInfo.data.email;
+
+    console.log(`📧 Connected Gmail account: ${email}`);
+
+    // Save connection to database
+    const { error } = await supabaseAdmin
+      .from('email_connections')
+      .upsert({
+        user_id: userId,
+        provider: 'gmail',
+        email: email,
+        access_token: tokens.access_token,
+        refresh_token: tokens.refresh_token,
+        token_expires_at: tokens.expiry_date ? new Date(tokens.expiry_date).toISOString() : null,
+        connected_at: new Date().toISOString(),
+        is_active: true
+      }, {
+        onConflict: 'user_id,provider'
+      });
+
+    if (error) {
+      console.error('❌ Error saving Gmail connection:', error);
+      return res.status(500).json({ error: 'Failed to save connection' });
+    }
+
+    console.log('✅ Gmail connection saved');
+    res.json({ success: true, email });
+
+  } catch (error) {
+    console.error('❌ Gmail connect error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get user's email connection status
+app.post('/api/gmail/status', async (req, res) => {
+  try {
+    const { userId } = req.body;
+
+    const { data, error } = await supabaseAdmin
+      .from('email_connections')
+      .select('email, provider, connected_at, is_active')
+      .eq('user_id', userId)
+      .eq('provider', 'gmail')
+      .single();
+
+    if (error && error.code !== 'PGRST116') { // PGRST116 = not found
+      throw error;
+    }
+
+    res.json({ connected: !!data, connection: data || null });
+
+  } catch (error) {
+    console.error('❌ Gmail status error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Disconnect Gmail
+app.post('/api/gmail/disconnect', async (req, res) => {
+  try {
+    const { userId } = req.body;
+
+    const { error } = await supabaseAdmin
+      .from('email_connections')
+      .delete()
+      .eq('user_id', userId)
+      .eq('provider', 'gmail');
+
+    if (error) throw error;
+
+    console.log('✅ Gmail disconnected');
+    res.json({ success: true });
+
+  } catch (error) {
+    console.error('❌ Gmail disconnect error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Search emails for receipts/invoices matching a transaction
+app.post('/api/gmail/search', async (req, res) => {
+  try {
+    const { userId, transactionDate, merchantName, amount } = req.body;
+
+    // Get user's Gmail tokens
+    const { data: connection, error: connError } = await supabaseAdmin
+      .from('email_connections')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('provider', 'gmail')
+      .single();
+
+    if (connError || !connection) {
+      return res.status(400).json({ error: 'Gmail not connected' });
+    }
+
+    // Set up OAuth client with user's tokens
+    const userOAuth = new google.auth.OAuth2(
+      process.env.GOOGLE_CLIENT_ID,
+      process.env.GOOGLE_CLIENT_SECRET
+    );
+    userOAuth.setCredentials({
+      access_token: connection.access_token,
+      refresh_token: connection.refresh_token
+    });
+
+    // Refresh token if needed
+    if (connection.token_expires_at && new Date(connection.token_expires_at) < new Date()) {
+      console.log('🔄 Refreshing Gmail token...');
+      const { credentials } = await userOAuth.refreshAccessToken();
+      userOAuth.setCredentials(credentials);
+
+      // Update stored tokens
+      await supabaseAdmin
+        .from('email_connections')
+        .update({
+          access_token: credentials.access_token,
+          token_expires_at: credentials.expiry_date ? new Date(credentials.expiry_date).toISOString() : null
+        })
+        .eq('id', connection.id);
+    }
+
+    const gmail = google.gmail({ version: 'v1', auth: userOAuth });
+
+    // Build search query
+    const txDate = new Date(transactionDate);
+    const startDate = new Date(txDate);
+    startDate.setDate(startDate.getDate() - 3); // 3 days before
+    const endDate = new Date(txDate);
+    endDate.setDate(endDate.getDate() + 3); // 3 days after
+
+    const formatDate = (d) => `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`;
+
+    // Search for receipts, orders, invoices around the transaction date
+    const searchTerms = [];
+
+    // Add merchant name variations
+    if (merchantName) {
+      const cleanMerchant = merchantName.replace(/[^\w\s]/g, '').trim();
+      if (cleanMerchant) {
+        searchTerms.push(cleanMerchant);
+      }
+    }
+
+    // Common receipt senders
+    const receiptSenders = [
+      'amazon', 'paypal', 'uber', 'deliveroo', 'just-eat', 'netflix',
+      'spotify', 'apple', 'google', 'microsoft', 'adobe', 'receipt',
+      'order', 'invoice', 'confirmation', 'booking'
+    ];
+
+    // Build query
+    let query = `after:${formatDate(startDate)} before:${formatDate(endDate)}`;
+
+    if (searchTerms.length > 0) {
+      query += ` (${searchTerms.join(' OR ')})`;
+    } else {
+      query += ` (${receiptSenders.join(' OR ')})`;
+    }
+
+    console.log(`🔍 Searching Gmail: ${query}`);
+
+    // Search for emails
+    const searchResult = await gmail.users.messages.list({
+      userId: 'me',
+      q: query,
+      maxResults: 10
+    });
+
+    if (!searchResult.data.messages || searchResult.data.messages.length === 0) {
+      return res.json({ matches: [] });
+    }
+
+    // Get details of each matching email
+    const matches = [];
+    for (const msg of searchResult.data.messages.slice(0, 5)) {
+      try {
+        const email = await gmail.users.messages.get({
+          userId: 'me',
+          id: msg.id,
+          format: 'full'
+        });
+
+        const headers = email.data.payload.headers;
+        const subject = headers.find(h => h.name === 'Subject')?.value || 'No subject';
+        const from = headers.find(h => h.name === 'From')?.value || 'Unknown';
+        const date = headers.find(h => h.name === 'Date')?.value || '';
+
+        // Get snippet/preview
+        const snippet = email.data.snippet || '';
+
+        // Try to extract body text for AI analysis
+        let bodyText = '';
+        if (email.data.payload.body?.data) {
+          bodyText = Buffer.from(email.data.payload.body.data, 'base64').toString();
+        } else if (email.data.payload.parts) {
+          const textPart = email.data.payload.parts.find(p => p.mimeType === 'text/plain');
+          if (textPart?.body?.data) {
+            bodyText = Buffer.from(textPart.body.data, 'base64').toString();
+          }
+        }
+
+        matches.push({
+          id: msg.id,
+          subject,
+          from,
+          date,
+          snippet,
+          bodyPreview: bodyText.substring(0, 500)
+        });
+      } catch (e) {
+        console.log('Error fetching email:', e.message);
+      }
+    }
+
+    // Use Claude to analyze matches and extract relevant info
+    if (matches.length > 0 && amount) {
+      try {
+        const analysisPrompt = `Analyze these emails to find receipts or invoices matching a transaction of £${Math.abs(amount).toFixed(2)} ${merchantName ? `from "${merchantName}"` : ''}.
+
+Emails found:
+${matches.map((m, i) => `
+[${i + 1}] Subject: ${m.subject}
+From: ${m.from}
+Date: ${m.date}
+Preview: ${m.snippet}
+`).join('\n')}
+
+For each email, determine:
+1. Is this likely a receipt/invoice for the transaction?
+2. What items/services were purchased?
+3. Confidence level (high/medium/low)
+
+Return JSON array:
+[{
+  "emailIndex": 1,
+  "isMatch": true/false,
+  "confidence": "high/medium/low",
+  "summary": "Brief description of what was purchased",
+  "extractedAmount": "Amount if found in email"
+}]
+
+Only include emails that seem relevant. Return empty array [] if none match.`;
+
+        const analysis = await anthropic.messages.create({
+          model: 'claude-sonnet-4-20250514',
+          max_tokens: 1000,
+          messages: [{ role: 'user', content: analysisPrompt }]
+        });
+
+        const responseText = analysis.content[0].text;
+        const jsonMatch = responseText.match(/\[[\s\S]*\]/);
+
+        if (jsonMatch) {
+          const analyzed = JSON.parse(jsonMatch[0]);
+
+          // Merge analysis with email data
+          const enrichedMatches = analyzed
+            .filter(a => a.isMatch)
+            .map(a => ({
+              ...matches[a.emailIndex - 1],
+              confidence: a.confidence,
+              summary: a.summary,
+              extractedAmount: a.extractedAmount
+            }));
+
+          return res.json({ matches: enrichedMatches });
+        }
+      } catch (e) {
+        console.log('AI analysis error:', e.message);
+      }
+    }
+
+    res.json({ matches });
+
+  } catch (error) {
+    console.error('❌ Gmail search error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 const HOST = '0.0.0.0'; // Listen on all network interfaces
 app.listen(PORT, HOST, () => {
@@ -2733,4 +3150,5 @@ app.listen(PORT, HOST, () => {
   console.log(`📄 PDF statement upload: enabled`);
   console.log(`🤖 AI categorization: ${process.env.ANTHROPIC_API_KEY ? 'enabled' : 'disabled'}`);
   console.log(`💾 Supabase: ${process.env.SUPABASE_URL ? 'connected' : 'not configured'}`);
+  console.log(`📧 Gmail integration: ${process.env.GOOGLE_CLIENT_ID ? 'enabled' : 'disabled'}`);
 });
