@@ -53,29 +53,110 @@ const supabaseAdmin = createClient(
 // PDF BANK STATEMENT UPLOAD & TRANSACTION EXTRACTION
 // ============================================
 
-// Helper function to extract transactions directly from PDF buffer using Claude's native PDF support
+// Helper: parse Claude's JSON response, handling truncation and markdown wrapping
+function parseTransactionJSON(responseText, label) {
+  let cleaned = responseText.replace(/```json\n?/gi, '').replace(/```\n?/g, '').trim();
+
+  // Handle truncated response — close the array at the last complete object
+  if (cleaned.startsWith('[') && !cleaned.trim().endsWith(']')) {
+    console.log(`⚠️ ${label} response truncated, attempting to fix...`);
+    const lastComplete = cleaned.lastIndexOf('},');
+    if (lastComplete > 0) {
+      cleaned = cleaned.substring(0, lastComplete + 1) + ']';
+    } else {
+      const lastBrace = cleaned.lastIndexOf('}');
+      if (lastBrace > 0) {
+        cleaned = cleaned.substring(0, lastBrace + 1) + ']';
+      }
+    }
+  }
+
+  const jsonMatch = cleaned.match(/\[[\s\S]*\]/);
+  if (!jsonMatch) {
+    console.error(`❌ No JSON array found in ${label} response`);
+    return [];
+  }
+
+  try {
+    return JSON.parse(jsonMatch[0]);
+  } catch (e) {
+    console.error(`❌ JSON parse error in ${label}:`, e.message);
+    return [];
+  }
+}
+
+// Extract transactions from a batch of PDF pages using Claude's native PDF support
+async function extractTransactionsFromPageBatch(base64PDF, startPage, endPage, totalPages) {
+  const label = `pages ${startPage}-${endPage}`;
+  console.log(`📄 Processing ${label} of ${totalPages}...`);
+
+  const message = await anthropic.messages.create({
+    model: "claude-haiku-4-5-20251001",
+    max_tokens: 8192,
+    messages: [{
+      role: "user",
+      content: [
+        {
+          type: "document",
+          source: {
+            type: "base64",
+            media_type: "application/pdf",
+            data: base64PDF,
+          },
+        },
+        {
+          type: "text",
+          text: `You are a bank statement parser. Extract ALL individual transactions from PAGES ${startPage} to ${endPage} of this bank statement PDF. IGNORE all other pages.
+
+IMPORTANT RULES:
+1. Extract EVERY SINGLE transaction on pages ${startPage}-${endPage} - do not skip any, do not summarize
+2. For amount: Use POSITIVE numbers for money going OUT (debits/expenses/purchases), NEGATIVE numbers for money coming IN (credits/income/deposits)
+3. For dates: Convert to YYYY-MM-DD format. If year is missing, assume current year or most recent past year
+4. For merchant_name: Clean up the name - remove card numbers, reference codes, extract the actual merchant/payee name
+5. Skip ONLY: balance entries, opening balances, closing balances, statement headers
+6. Include ALL: purchases, payments, transfers, direct debits, standing orders, card payments, ATM withdrawals
+7. Common UK bank formats: "DD MMM" or "DD/MM/YYYY" dates, amounts with £ symbol
+
+Respond with ONLY a valid JSON array. No explanation, no markdown, just raw JSON starting with [ and ending with ].
+
+Format:
+[{"merchant_name": "Tesco", "amount": 45.23, "transaction_date": "2024-01-15", "description": "Original transaction text"}]
+
+If no transactions found on these pages, respond with exactly: []`
+        }
+      ]
+    }]
+  });
+
+  return parseTransactionJSON(message.content[0].text, label);
+}
+
+// Main extraction: splits large PDFs into page batches for reliable extraction
 async function extractTransactionsFromPDF(pdfBuffer) {
   try {
     const base64PDF = pdfBuffer.toString('base64');
-    console.log(`📄 Sending PDF directly to Claude (${(pdfBuffer.length / 1024).toFixed(0)}KB)`);
+    const pdfData = await pdfParse(pdfBuffer);
+    const pageCount = pdfData.numpages;
 
-    const message = await anthropic.messages.create({
-      model: "claude-sonnet-4-6",
-      max_tokens: 16000,
-      messages: [{
-        role: "user",
-        content: [
-          {
-            type: "document",
-            source: {
-              type: "base64",
-              media_type: "application/pdf",
-              data: base64PDF,
+    console.log(`📄 PDF has ${pageCount} pages (${(pdfBuffer.length / 1024).toFixed(0)}KB)`);
+
+    const PAGES_PER_BATCH = 5;
+
+    // Small PDFs — process in one go
+    if (pageCount <= PAGES_PER_BATCH) {
+      const message = await anthropic.messages.create({
+        model: "claude-haiku-4-5-20251001",
+        max_tokens: 8192,
+        messages: [{
+          role: "user",
+          content: [
+            {
+              type: "document",
+              source: { type: "base64", media_type: "application/pdf", data: base64PDF },
             },
-          },
-          {
-            type: "text",
-            text: `You are a bank statement parser. Extract ALL individual transactions from this bank statement PDF.
+            {
+              type: "text",
+              text: `You are a bank statement parser. Extract ALL individual transactions from this bank statement PDF.
 
 IMPORTANT RULES:
 1. Extract EVERY SINGLE transaction - do not skip any, do not summarize
@@ -92,23 +173,49 @@ Format:
 [{"merchant_name": "Tesco", "amount": 45.23, "transaction_date": "2024-01-15", "description": "Original transaction text"}]
 
 If no transactions found, respond with exactly: []`
-          }
-        ]
-      }]
-    });
+            }
+          ]
+        }]
+      });
 
-    let responseText = message.content[0].text;
-    responseText = responseText.replace(/```json\n?/gi, '').replace(/```\n?/g, '').trim();
-
-    const jsonMatch = responseText.match(/\[[\s\S]*\]/);
-    if (!jsonMatch) {
-      console.error('❌ No JSON array found in Claude response');
-      return [];
+      const transactions = parseTransactionJSON(message.content[0].text, 'single batch');
+      console.log(`✅ Extracted ${transactions.length} transactions from PDF`);
+      return transactions;
     }
 
-    const transactions = JSON.parse(jsonMatch[0]);
-    console.log(`✅ Extracted ${transactions.length} transactions from PDF`);
-    return transactions;
+    // Large PDFs — process in page batches (2 concurrent)
+    const batches = [];
+    for (let i = 1; i <= pageCount; i += PAGES_PER_BATCH) {
+      batches.push({ start: i, end: Math.min(i + PAGES_PER_BATCH - 1, pageCount) });
+    }
+
+    console.log(`📦 Split into ${batches.length} batches of ${PAGES_PER_BATCH} pages`);
+
+    const CONCURRENT = 4;
+    let allTransactions = [];
+
+    for (let i = 0; i < batches.length; i += CONCURRENT) {
+      const batchSlice = batches.slice(i, i + CONCURRENT);
+      const results = await Promise.all(
+        batchSlice.map(b => extractTransactionsFromPageBatch(base64PDF, b.start, b.end, pageCount))
+      );
+      for (const txns of results) {
+        allTransactions = allTransactions.concat(txns);
+      }
+      console.log(`✅ Completed batches ${i + 1}-${Math.min(i + CONCURRENT, batches.length)} of ${batches.length}`);
+    }
+
+    // Deduplicate (page boundary overlaps)
+    const seen = new Set();
+    const unique = allTransactions.filter(txn => {
+      const key = `${txn.transaction_date}_${txn.amount}_${txn.merchant_name}`.toLowerCase().trim();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
+    console.log(`✅ Extracted ${unique.length} unique transactions (${allTransactions.length - unique.length} duplicates removed)`);
+    return unique;
   } catch (error) {
     console.error('❌ Error extracting transactions from PDF:', error);
     throw error;
@@ -172,71 +279,94 @@ app.post('/api/upload_statement', upload.single('pdf'), async (req, res) => {
 
     console.log(`📝 Statement record created: ${statement.id}`);
 
-    // 3. Extract transactions using Claude
-    console.log('🤖 Extracting transactions with AI...');
-    const transactions = await extractTransactionsFromPDF(file.buffer);
-
-    // 4. Save transactions with batch insert and deduplication
-    const validTransactions = transactions
-      .filter(txn => txn.merchant_name && txn.amount !== undefined && txn.transaction_date)
-      .map(txn => {
-        const hashInput = `${txn.transaction_date}_${txn.amount}_${txn.merchant_name}`.toLowerCase().trim();
-        const transactionHash = crypto.createHash('md5').update(hashInput).digest('hex');
-        return {
-          user_id,
-          statement_id: statement.id,
-          merchant_name: txn.merchant_name,
-          amount: parseFloat(txn.amount),
-          transaction_date: txn.transaction_date,
-          description: txn.description || null,
-          transaction_hash: transactionHash
-        };
-      });
-
-    let savedCount = 0;
-    let duplicateCount = 0;
-
-    // Batch insert in chunks of 100 for better performance
-    const BATCH_SIZE = 100;
-    for (let i = 0; i < validTransactions.length; i += BATCH_SIZE) {
-      const batch = validTransactions.slice(i, i + BATCH_SIZE);
-      const { data, error: insertError } = await supabaseAdmin
-        .from('uploaded_transactions')
-        .upsert(batch, {
-          onConflict: 'user_id,transaction_hash',
-          ignoreDuplicates: true
-        })
-        .select();
-
-      if (insertError) {
-        console.error('⚠️  Batch insert error:', insertError);
-      } else {
-        savedCount += data?.length || 0;
-      }
-    }
-
-    duplicateCount = validTransactions.length - savedCount;
-    console.log(`✅ Saved ${savedCount} transactions, ${duplicateCount} duplicates skipped`);
-
-    // 5. Update statement record with results
-    await supabaseAdmin
-      .from('bank_statements')
-      .update({
-        status: 'completed',
-        transaction_count: savedCount
-      })
-      .eq('id', statement.id);
-
+    // 3. Respond immediately — process PDF in background
     res.json({
       success: true,
       statement_id: statement.id,
-      transactions_found: transactions.length,
-      transactions_saved: savedCount,
-      duplicates_skipped: duplicateCount
+      status: 'processing',
     });
+
+    // 4. Background: Extract and save transactions
+    (async () => {
+      try {
+        console.log('🤖 Extracting transactions with AI...');
+        const transactions = await extractTransactionsFromPDF(file.buffer);
+
+        const validTransactions = transactions
+          .filter(txn => txn.merchant_name && txn.amount !== undefined && txn.transaction_date)
+          .map(txn => {
+            const hashInput = `${txn.transaction_date}_${txn.amount}_${txn.merchant_name}`.toLowerCase().trim();
+            const transactionHash = crypto.createHash('md5').update(hashInput).digest('hex');
+            return {
+              user_id,
+              statement_id: statement.id,
+              merchant_name: txn.merchant_name,
+              amount: parseFloat(txn.amount),
+              transaction_date: txn.transaction_date,
+              description: txn.description || null,
+              transaction_hash: transactionHash
+            };
+          });
+
+        let savedCount = 0;
+
+        const BATCH_SIZE = 100;
+        for (let i = 0; i < validTransactions.length; i += BATCH_SIZE) {
+          const batch = validTransactions.slice(i, i + BATCH_SIZE);
+          const { data, error: insertError } = await supabaseAdmin
+            .from('uploaded_transactions')
+            .upsert(batch, {
+              onConflict: 'user_id,transaction_hash',
+              ignoreDuplicates: true
+            })
+            .select();
+
+          if (insertError) {
+            console.error('⚠️  Batch insert error:', insertError);
+          } else {
+            savedCount += data?.length || 0;
+          }
+        }
+
+        const duplicateCount = validTransactions.length - savedCount;
+        console.log(`✅ Saved ${savedCount} transactions, ${duplicateCount} duplicates skipped`);
+
+        await supabaseAdmin
+          .from('bank_statements')
+          .update({ status: 'completed', transaction_count: savedCount })
+          .eq('id', statement.id);
+
+      } catch (bgError) {
+        console.error('❌ Background processing error:', bgError);
+        await supabaseAdmin
+          .from('bank_statements')
+          .update({ status: 'error' })
+          .eq('id', statement.id);
+      }
+    })();
 
   } catch (error) {
     console.error('❌ Error uploading statement:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Check statement processing status
+app.post('/api/statement_status', async (req, res) => {
+  try {
+    const { statement_id } = req.body;
+    if (!statement_id) return res.status(400).json({ error: 'statement_id is required' });
+
+    const { data, error } = await supabaseAdmin
+      .from('bank_statements')
+      .select('status, transaction_count')
+      .eq('id', statement_id)
+      .single();
+
+    if (error) throw error;
+    res.json(data);
+  } catch (error) {
+    console.error('❌ Error checking statement status:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -2293,7 +2423,8 @@ app.post('/api/export_transactions', async (req, res) => {
       'Type',
       'HMRC Category',
       'Tax Deductible',
-      'Notes'
+      'Notes',
+      'Receipt / Evidence URL'
     ];
 
     // Generate CSV rows for transactions
@@ -2329,7 +2460,8 @@ app.post('/api/export_transactions', async (req, res) => {
         type,
         `"${txn.category_name || 'Uncategorized'}"`,
         txn.tax_deductible ? 'Yes' : 'No',
-        `"${notes}"`
+        `"${notes}"`,
+        `"${txn.receipt_image_url || ''}"`
       ].join(',');
     });
 
@@ -2352,7 +2484,8 @@ app.post('/api/export_transactions', async (req, res) => {
         'Income', // Type
         '"Gifted Item (Income)"', // Category
         'Yes', // Tax relevant
-        `"GIFTED ITEM: ${item.item_name} (RRP £${rrp.toFixed(2)})${item.received_from ? ' | From: ' + item.received_from : ''}${item.reason ? ' | Reason: ' + item.reason : ''} ${notes ? '- ' + notes : ''}"`
+        `"GIFTED ITEM: ${item.item_name} (RRP £${rrp.toFixed(2)})${item.received_from ? ' | From: ' + item.received_from : ''}${item.reason ? ' | Reason: ' + item.reason : ''} ${notes ? '- ' + notes : ''}"`,
+        `"${item.photo_url || ''}"`
       ].join(',');
     });
 
@@ -2484,7 +2617,8 @@ app.get('/api/download_transactions', async (req, res) => {
       'Tax Deductible',
       'Has Evidence',
       'Notes',
-      'User Answers'
+      'User Answers',
+      'Receipt / Evidence URL'
     ];
 
     // Generate CSV rows for transactions
@@ -2507,19 +2641,20 @@ app.get('/api/download_transactions', async (req, res) => {
         txn.tax_deductible ? 'Yes' : 'No',
         txn.qualified ? 'Yes' : 'No',
         `"${(txn.explanation || '').replace(/"/g, '""')}"`,
-        `"${formatUserAnswers(txn.user_answers)}"`
+        `"${formatUserAnswers(txn.user_answers)}"`,
+        `"${txn.receipt_image_url || ''}"`
       ].join(',');
     });
 
     // Generate CSV rows for gifted items
     const giftedRows = (giftedItems || []).map(item => {
-      const estimatedValue = item.estimated_value || 0;
+      const rrp = parseFloat(item.rrp) || 0;
 
       return [
         item.received_date,
-        `"${(item.brand_company || 'Unknown').replace(/"/g, '""')}"`,
-        estimatedValue.toFixed(2),
-        estimatedValue.toFixed(2), // Business amount = total for gifted items
+        `"${(item.received_from || item.item_name || 'Gifted Item').replace(/"/g, '""')}"`,
+        rrp.toFixed(2),
+        rrp.toFixed(2), // Business amount = total for gifted items
         '0.00', // Personal amount = 0 for gifted items
         '100', // Business % = 100% for gifted items
         'Income (Gifted)',
@@ -2527,7 +2662,8 @@ app.get('/api/download_transactions', async (req, res) => {
         'Taxable',
         'Yes', // Gifted items are always considered to have evidence (they're explicitly tracked)
         `"Item: ${(item.item_name || 'N/A').replace(/"/g, '""')}, From: ${(item.received_from || 'N/A').replace(/"/g, '""')}, Reason: ${(item.reason || 'N/A').replace(/"/g, '""')}"`,
-        '""' // Empty User Answers for gifted items
+        '""', // Empty User Answers for gifted items
+        `"${item.photo_url || ''}"`
       ].join(',');
     });
 
