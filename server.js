@@ -53,131 +53,62 @@ const supabaseAdmin = createClient(
 // PDF BANK STATEMENT UPLOAD & TRANSACTION EXTRACTION
 // ============================================
 
-// Helper function to extract transactions from a chunk of PDF text using Claude
-async function extractTransactionsFromChunk(textChunk, chunkIndex, totalChunks) {
-  const message = await anthropic.messages.create({
-    model: "claude-3-5-haiku-20241022",
-    max_tokens: 8192, // Max for Haiku
-    messages: [{
-      role: "user",
-      content: `You are a bank statement parser. Extract ALL individual transactions from this bank statement text.
+// Helper function to extract transactions directly from PDF buffer using Claude's native PDF support
+async function extractTransactionsFromPDF(pdfBuffer) {
+  try {
+    const base64PDF = pdfBuffer.toString('base64');
+    console.log(`📄 Sending PDF directly to Claude (${(pdfBuffer.length / 1024).toFixed(0)}KB)`);
+
+    const message = await anthropic.messages.create({
+      model: "claude-sonnet-4-6",
+      max_tokens: 16000,
+      messages: [{
+        role: "user",
+        content: [
+          {
+            type: "document",
+            source: {
+              type: "base64",
+              media_type: "application/pdf",
+              data: base64PDF,
+            },
+          },
+          {
+            type: "text",
+            text: `You are a bank statement parser. Extract ALL individual transactions from this bank statement PDF.
 
 IMPORTANT RULES:
-1. Extract EVERY SINGLE transaction you find - do not skip any, do not summarize
+1. Extract EVERY SINGLE transaction - do not skip any, do not summarize
 2. For amount: Use POSITIVE numbers for money going OUT (debits/expenses/purchases), NEGATIVE numbers for money coming IN (credits/income/deposits)
 3. For dates: Convert to YYYY-MM-DD format. If year is missing, assume current year or most recent past year
-4. For merchant_name: Clean up the name - remove card numbers, reference codes, and extract the actual merchant/payee name
+4. For merchant_name: Clean up the name - remove card numbers, reference codes, extract the actual merchant/payee name
 5. Skip ONLY: balance entries, opening balances, closing balances, statement headers
 6. Include ALL: purchases, payments, transfers, direct debits, standing orders, card payments, ATM withdrawals
 7. Common UK bank formats: "DD MMM" or "DD/MM/YYYY" dates, amounts with £ symbol
 
-This is chunk ${chunkIndex + 1} of ${totalChunks} from a larger statement. Extract ALL transactions from this chunk.
-
-BANK STATEMENT TEXT:
-${textChunk}
-
-You MUST respond with ONLY a valid JSON array. No explanation, no markdown, just the raw JSON array starting with [ and ending with ].
+Respond with ONLY a valid JSON array. No explanation, no markdown, just raw JSON starting with [ and ending with ].
 
 Format:
 [{"merchant_name": "Tesco", "amount": 45.23, "transaction_date": "2024-01-15", "description": "Original transaction text"}]
 
-If no transactions found in this chunk, respond with exactly: []`
-    }]
-  });
-
-  let responseText = message.content[0].text;
-
-  // Clean up the response - remove markdown code blocks if present
-  responseText = responseText.replace(/```json\n?/gi, '').replace(/```\n?/g, '').trim();
-
-  // Check if the response was truncated (starts with [ but doesn't end with ])
-  if (responseText.startsWith('[') && !responseText.trim().endsWith(']')) {
-    console.log(`⚠️ Chunk ${chunkIndex + 1} response truncated, attempting to fix...`);
-    const lastCompleteObject = responseText.lastIndexOf('},');
-    if (lastCompleteObject > 0) {
-      responseText = responseText.substring(0, lastCompleteObject + 1) + ']';
-    } else {
-      const lastBrace = responseText.lastIndexOf('}');
-      if (lastBrace > 0) {
-        responseText = responseText.substring(0, lastBrace + 1) + ']';
-      }
-    }
-  }
-
-  // Find the JSON array in the response
-  const jsonMatch = responseText.match(/\[[\s\S]*\]/);
-  if (!jsonMatch) {
-    console.error(`❌ No JSON array found in chunk ${chunkIndex + 1} response`);
-    return [];
-  }
-
-  try {
-    return JSON.parse(jsonMatch[0]);
-  } catch (parseError) {
-    console.error(`❌ JSON parse error in chunk ${chunkIndex + 1}:`, parseError.message);
-    return [];
-  }
-}
-
-// Helper function to extract transactions from PDF using Claude with chunking
-async function extractTransactionsFromPDF(pdfBuffer) {
-  try {
-    // Extract text from PDF
-    const pdfData = await pdfParse(pdfBuffer);
-    const pageCount = pdfData.numpages;
-    const fullText = pdfData.text;
-
-    console.log(`📄 Processing PDF with ${pageCount} pages`);
-    console.log(`📝 Extracted ${fullText.length} characters of text`);
-
-    // Split text into chunks to handle large PDFs
-    // Each chunk should be small enough that 8192 output tokens can handle all transactions
-    // ~100 chars per transaction JSON, 8192 tokens ~= 6000 chars output, so ~60 transactions max per chunk
-    // Bank statements average ~200-300 chars per transaction in source text
-    const CHUNK_SIZE = 8000; // Characters per chunk (smaller to ensure output fits in 8192 tokens)
-    const OVERLAP = 300; // Overlap between chunks to avoid missing transactions at boundaries
-
-    const chunks = [];
-    for (let i = 0; i < fullText.length; i += CHUNK_SIZE - OVERLAP) {
-      chunks.push(fullText.substring(i, i + CHUNK_SIZE));
-    }
-
-    console.log(`📦 Split into ${chunks.length} chunks for processing`);
-
-    // Process chunks in parallel (max 3 at a time to avoid rate limits)
-    const PARALLEL_LIMIT = 3;
-    let allTransactions = [];
-
-    for (let i = 0; i < chunks.length; i += PARALLEL_LIMIT) {
-      const chunkBatch = chunks.slice(i, i + PARALLEL_LIMIT);
-      const promises = chunkBatch.map((chunk, idx) =>
-        extractTransactionsFromChunk(chunk, i + idx, chunks.length)
-      );
-
-      const results = await Promise.all(promises);
-      for (const transactions of results) {
-        allTransactions = allTransactions.concat(transactions);
-      }
-
-      console.log(`✅ Processed chunks ${i + 1}-${Math.min(i + PARALLEL_LIMIT, chunks.length)} of ${chunks.length}`);
-    }
-
-    console.log(`📊 Total transactions extracted before dedup: ${allTransactions.length}`);
-
-    // Deduplicate transactions that might appear in overlapping chunks
-    const seen = new Set();
-    const uniqueTransactions = allTransactions.filter(txn => {
-      const key = `${txn.transaction_date}_${txn.amount}_${txn.merchant_name}`.toLowerCase().trim();
-      if (seen.has(key)) {
-        return false;
-      }
-      seen.add(key);
-      return true;
+If no transactions found, respond with exactly: []`
+          }
+        ]
+      }]
     });
 
-    console.log(`✅ Extracted ${uniqueTransactions.length} unique transactions from PDF (removed ${allTransactions.length - uniqueTransactions.length} duplicates from chunk overlap)`);
+    let responseText = message.content[0].text;
+    responseText = responseText.replace(/```json\n?/gi, '').replace(/```\n?/g, '').trim();
 
-    return uniqueTransactions;
+    const jsonMatch = responseText.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) {
+      console.error('❌ No JSON array found in Claude response');
+      return [];
+    }
+
+    const transactions = JSON.parse(jsonMatch[0]);
+    console.log(`✅ Extracted ${transactions.length} transactions from PDF`);
+    return transactions;
   } catch (error) {
     console.error('❌ Error extracting transactions from PDF:', error);
     throw error;
@@ -712,7 +643,7 @@ Respond with ONLY valid JSON:
 }`);
 
       const message = await anthropic.messages.create({
-        model: "claude-3-5-haiku-20241022",
+        model: "claude-sonnet-4-6",
         max_tokens: 500,
         messages: [{ role: "user", content: incomePrompt }]
       });
@@ -1067,7 +998,7 @@ Respond with ONLY valid JSON with ONE question:
 }`;
 
     const message = await anthropic.messages.create({
-      model: "claude-3-5-haiku-20241022", // Use Haiku for faster question generation
+      model: "claude-sonnet-4-6", // Use Haiku for faster question generation
       max_tokens: 500,
       messages: [{ role: "user", content: prompt }]
     });
@@ -1186,7 +1117,7 @@ Respond with ONLY valid JSON with ONE question:
 
       try {
         const message = await anthropic.messages.create({
-          model: "claude-3-5-haiku-20241022",
+          model: "claude-sonnet-4-6",
           max_tokens: 400,
           messages: [{ role: "user", content: prompt }]
         });
@@ -1215,9 +1146,9 @@ Respond with ONLY valid JSON with ONE question:
       }
     };
 
-    // Process in batches to avoid rate limits (50 requests/min limit)
-    const BATCH_SIZE = 10; // Process 10 at a time
-    const BATCH_DELAY = 1500; // 1.5 second delay between batches
+    // Process in batches to avoid rate limits
+    const BATCH_SIZE = 20; // Sonnet handles larger batches reliably
+    const BATCH_DELAY = 1000; // 1 second delay between batches
     const results = [];
 
     for (let i = 0; i < transactions.length; i += BATCH_SIZE) {
@@ -1462,7 +1393,7 @@ FOR BUSINESS/SELF-EMPLOYMENT INCOME:
 }`;
 
       const message = await anthropic.messages.create({
-        model: "claude-3-5-haiku-20241022",
+        model: "claude-sonnet-4-6",
         max_tokens: 600,
         messages: [{ role: "user", content: incomePrompt }]
       });
@@ -1807,7 +1738,7 @@ FOR SPLIT TRANSACTIONS (mixed shopping with business items):
 
 
     const message = await anthropic.messages.create({
-      model: "claude-3-5-haiku-20241022",
+      model: "claude-sonnet-4-6",
       max_tokens: 800,
       messages: [{ role: "user", content: prompt }]
     });
@@ -1918,7 +1849,7 @@ Respond with ONLY valid JSON:
 
         // Call AI to categorize
         const message = await anthropic.messages.create({
-          model: "claude-3-5-haiku-20241022",
+          model: "claude-sonnet-4-6",
           max_tokens: 600,
           messages: [{ role: "user", content: prompt }]
         });
@@ -2098,7 +2029,7 @@ FOR SPLIT TRANSACTIONS (if feedback indicates splitting):
 }`;
 
     const message = await anthropic.messages.create({
-      model: "claude-3-5-haiku-20241022",
+      model: "claude-sonnet-4-6",
       max_tokens: 800,
       messages: [{ role: "user", content: prompt }]
     });
@@ -2649,7 +2580,7 @@ app.post('/api/recognize_item', async (req, res) => {
     console.log('🔍 Analyzing item image...');
 
     const message = await anthropic.messages.create({
-      model: 'claude-3-5-haiku-20241022',
+      model: 'claude-sonnet-4-6',
       max_tokens: 1024,
       messages: [{
         role: 'user',
