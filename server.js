@@ -452,7 +452,6 @@ app.post('/api/generate_questions', requireAuth, rateLimit(30, 60000), async (re
           'repaying', 'split', 'share', 'shared'
         ];
 
-        // Employment/PAYE salary keywords - these don't need further categorization
         const employmentKeywords = [
           'salary', 'paye', 'wages', 'payroll', 'employer', 'employment',
           'monthly pay', 'weekly pay', 'job', 'work salary', 'my employer',
@@ -464,261 +463,133 @@ app.post('/api/generate_questions', requireAuth, rateLimit(30, 60000), async (re
 
         if (isPersonalIncome) {
           console.log('🏠 Personal income detected in Q1:', q1Answer);
-          console.log('✅ Skipping Q2 - ready to categorize as personal income');
           res.json({ questions: [] });
           return;
         }
 
         if (isEmploymentIncome) {
           console.log('💼 Employment income detected in Q1:', q1Answer);
-          console.log('✅ Skipping Q2 - ready to categorize as PAYE employment income');
           res.json({ questions: [] });
           return;
         }
       }
 
-      // CRITICAL: If we have 2 answers for business income, we're done
       if (numAnswered >= 2) {
         console.log('✅ Income: 2 questions answered, ready to categorize');
         res.json({ questions: [] });
         return;
       }
 
-      const incomePrompt = hasPreviousAnswers
-        ? `You are a UK tax assistant helping a ${workTypeDesc} categorize income.
+      const merchantName = transaction.merchant_name || transaction.name;
+      const amount = Math.abs(transaction.amount);
+      const previousAnswersStr = JSON.stringify(previousAnswers, null, 2);
 
-USER PROFILE:
-- Work type: ${workTypeDesc}
-- Monthly income: £${userProfile?.monthly_income || 'unknown'}
-- Has international income: ${userProfile?.has_international_income ? 'Yes' : 'No'}
+      const incomePrompt = numAnswered === 0
+        ? `You are a friendly UK tax assistant helping a ${workTypeDesc} categorize a bank transaction. Be conversational, not robotic.
 
-TRANSACTION (INCOME):
-- Merchant/Payer: ${transaction.merchant_name || transaction.name}
-- Amount: £${Math.abs(transaction.amount)}
-- Date: ${transaction.date}
-- Plaid Category: ${transaction.category?.join(', ') || 'Unknown'}
+TRANSACTION: £${amount} received from "${merchantName}" on ${transaction.date}
 
-PREVIOUS ANSWERS:
-${JSON.stringify(previousAnswers, null, 2)}
+USER: ${workTypeDesc}, earns ~£${userProfile?.monthly_income || 'unknown'}/month${userProfile?.has_international_income ? ', has international income' : ''}
 
-NUMBER OF ANSWERS: ${numAnswered}
+YOUR TASK: Ask ONE smart opening question about this specific payment.
 
-YOUR GOAL: Check if we need more questions or can categorize.
+RULES:
+- Your question MUST reference the merchant name and/or amount naturally
+- Do NOT use generic questions like "What is this income for?"
+- Infer what this likely is from the merchant name and amount, and frame the question around that
+- Provide 4-5 options that are specific to this transaction
+- Always include at least one personal option (friend paying back, gift, etc.)
+- If the amount looks like a salary (round numbers £1,500-£6,000, or from a company name), include a PAYE salary option
 
-STEP 1: Check Q1 answer - is this PERSONAL or BUSINESS income?
+EXAMPLES of good contextual questions:
 
-PERSONAL INCOME indicators (stop asking questions):
-- "Friend/family paying me back"
-- "Personal transfer"
-- "Gift"
-- "Reimbursement"
-- "Friend paying me back for dinner"
-- Any mention of friends, family, personal, gift, paying back
-
-If Q1 indicates PERSONAL → Return empty questions [] (ready to categorize as personal)
-
-BUSINESS INCOME (ask Q2):
-- Only ask Q2 if Q1 indicated business income (sponsorship, client, platform revenue, etc.)
-- Q2: "What type of income is this?" with business categories
-
-STEP 2: If Q1 was business income and we have 2 answers:
-- Return empty questions [] (ready to categorize)
-
-If Q2 answer was "Other income" → Ask ONE more question:
+£500.00 from "GOOGLE ADSENSE" to a content creator:
 {
-  "questions": [
-    {
-      "text": "Can you briefly describe what this income was for?",
-      "options": []
-    }
-  ]
+  "questions": [{
+    "text": "This looks like a payment from Google AdSense - is this from your content?",
+    "options": ["Yes, ad revenue from my videos", "Affiliate or referral payout", "Friend/family paying me back", "Something else"]
+  }]
 }
 
-CRITICAL: Respond with ONLY valid JSON. No text before or after.
-
-If personal income detected OR we have enough business income info:
+£1,200.00 from "BRAND STUDIO LTD" to a content creator:
 {
-  "questions": []
+  "questions": [{
+    "text": "You received £1,200 from Brand Studio Ltd - what was this for?",
+    "options": ["Brand deal or sponsorship", "Client project payment", "My employer paying my salary", "Personal transfer / paying me back"]
+  }]
 }
 
-If Q1 was business income and we need Q2:
+£50.00 from "J SMITH" to a freelancer:
 {
-  "questions": [
-    {
-      "text": "What type of income is this?",
-      "options": ["Based on work type - see Q2 examples"]
-    }
-  ]
-}`
-        : (numAnswered === 1
-          ? `You are a UK tax assistant helping a ${workTypeDesc} categorize income.
-
-USER PROFILE:
-- Work type: ${workTypeDesc}
-- Monthly income: £${userProfile?.monthly_income || 'unknown'}
-- Has international income: ${userProfile?.has_international_income ? 'Yes' : 'No'}
-
-TRANSACTION (INCOME):
-- Merchant/Payer: ${transaction.merchant_name || transaction.name}
-- Amount: £${Math.abs(transaction.amount)}
-- Date: ${transaction.date}
-
-ANSWER TO Q1 ("What is this income for?"):
-${JSON.stringify(previousAnswers, null, 2)}
-
-YOUR GOAL: Check if Q1 indicates PERSONAL or BUSINESS income.
-
-STEP 1: Analyze the Q1 answer carefully.
-
-PERSONAL/NON-BUSINESS INCOME indicators (stop asking questions - return empty array):
-- Contains words: "friend", "family", "paying me back", "paying back", "reimbursement", "reimburse"
-- Contains words: "gift", "personal transfer", "personal", "dinner", "lunch", "expense"
-- Contains words: "borrowed", "owe", "owed", "repay", "repaying"
-- Describes a non-business personal transaction
-
-EMPLOYMENT INCOME indicators (stop asking questions - return empty array):
-- Contains words: "salary", "PAYE", "wages", "payroll", "employer", "employment"
-- Contains words: "monthly pay", "weekly pay", "job", "work salary"
-- Regular employment from an employer (already taxed at source via PAYE)
-- This is NOT self-employment income - it's standard employment
-
-BUSINESS/SELF-EMPLOYMENT INCOME indicators (ask Q2):
-- Client payments, sponsorships, brand deals
-- Platform revenue (YouTube, TikTok, etc.)
-- Sales, commissions, fees
-- Freelance or self-employment income
-
-STEP 2: Decide what to return.
-
-If PERSONAL INCOME or EMPLOYMENT INCOME detected in Q1:
-{
-  "questions": []
+  "questions": [{
+    "text": "£50 from J Smith - do you know what this was for?",
+    "options": ["Client payment for work", "Friend or family paying me back", "Gift", "Personal transfer"]
+  }]
 }
 
-If BUSINESS/SELF-EMPLOYMENT INCOME detected in Q1:
+£2,800.00 from "ACME CORP LTD" to a side hustler:
 {
-  "questions": [
-    {
-      "text": "What type of income is this?",
-      "options": [/* business options based on work type */]
-    }
-  ]
+  "questions": [{
+    "text": "£2,800 from Acme Corp Ltd - this looks like it could be a salary. Is that right?",
+    "options": ["Yes, this is my PAYE salary", "Payment for freelance/contract work", "Client paying an invoice", "Something else"]
+  }]
 }
 
-QUESTION 2 OPTIONS (only if business income):
+Respond with ONLY valid JSON. No text before or after.`
+        : `You are a friendly UK tax assistant helping a ${workTypeDesc} categorize income. Be conversational.
 
-For content_creation:
-- "Sponsorship or brand deal"
-- "Ad revenue (YouTube, TikTok, etc.)"
-- "Affiliate commissions"
-- "Client work or consulting"
-- "Product or merchandise sales"
-- "Other income"
+TRANSACTION: £${amount} from "${merchantName}" on ${transaction.date}
+USER: ${workTypeDesc}
 
-For freelancing:
-- "Client fees or project payment"
-- "Retainer or ongoing contract"
-- "Commission or referral fee"
-- "Consulting or advisory work"
-- "Product or service sales"
-- "Other income"
+CONVERSATION SO FAR:
+${previousAnswersStr}
 
-For side_hustle or general:
-- "Sales or revenue"
-- "Client payment"
-- "Commission or referral fee"
-- "Service fees"
-- "Product sales"
-- "Other income"
+YOUR TASK: Based on their answer, decide what to do next.
 
-CRITICAL:
-1. Check Q1 answer for personal income keywords FIRST
-2. Respond with ONLY valid JSON
-3. Return empty questions [] if personal income detected`
-          : `You are a UK tax assistant helping a ${workTypeDesc} categorize income.
+IF their answer clearly indicates PERSONAL income (friend, family, gift, paying back, reimbursement, personal):
+→ Return {"questions": []}
 
-USER PROFILE:
-- Work type: ${workTypeDesc}
-- Monthly income: £${userProfile?.monthly_income || 'unknown'}
-- Has international income: ${userProfile?.has_international_income ? 'Yes' : 'No'}
+IF their answer clearly indicates EMPLOYMENT income (salary, PAYE, wages, employer):
+→ Return {"questions": []}
 
-TRANSACTION (INCOME):
-- Merchant/Payer: ${transaction.merchant_name || transaction.name}
-- Amount: £${Math.abs(transaction.amount)}
-- Date: ${transaction.date}
-- Plaid Category: ${transaction.category?.join(', ') || 'Unknown'}
+IF their answer indicates BUSINESS/SELF-EMPLOYMENT income:
+→ Ask ONE follow-up to clarify the income type. Your question MUST reference what they just told you.
 
-YOUR GOAL: Generate Q1 ONLY - ask what this income is for.
-
-QUESTION 1: "What is this income for?"
-- Generate 4-5 SPECIFIC suggestions based on:
-  * The merchant/payer name (${transaction.merchant_name || transaction.name})
-  * The transaction amount (£${Math.abs(transaction.amount)})
-  * What this ${workTypeDesc} typically receives income from
-  * Include BOTH business AND personal income options
-
-EXAMPLES:
-
-For content_creation work type:
-
-YouTube payment (£500):
-Q1: "What is this income for?"
-- "YouTube/Google ad revenue"
-- "Brand sponsorship payment"
-- "Friend/family paying me back"
-- "Gift or personal transfer"
-
-Brand Studio Ltd (£1200):
-Q1: "What is this income for?"
-- "Brand partnership/sponsorship"
-- "Client project payment"
-- "Friend paying me back for dinner/expense"
-- "Personal transfer"
-
-Unknown transfer (£50):
-Q1: "What is this income for?"
-- "Friend/family reimbursement"
-- "Gift or personal money"
-- "Affiliate commission"
-- "Small client payment"
-
-For freelancing work type:
-
-Bank transfer (£2000):
-Q1: "What is this income for?"
-- "Client project payment"
-- "Retainer or ongoing contract"
-- "Friend/family transfer"
-- "Personal reimbursement"
-
-PayPal payment (£500):
-Q1: "What is this income for?"
-- "Client invoice payment"
-- "Freelance platform payment"
-- "Personal transfer from friend/family"
-- "Gift"
-
-IMPORTANT RULES:
-- Make suggestions specific to the payer name and amount
-- ALWAYS include personal/non-business options like:
-  * "Friend/family paying me back"
-  * "Personal transfer"
-  * "Gift"
-  * "Reimbursement"
-- If the amount looks like a regular salary (e.g., round numbers like £1500-£6000, or from company names), include:
-  * "PAYE salary from my employer"
-- Include common business income for ${workTypeDesc}
-- Provide exactly 4-5 options
-
-Respond with ONLY valid JSON:
+EXAMPLE: If they said "Yes, ad revenue from my videos":
 {
-  "questions": [
-    {
-      "text": "What is this income for?",
-      "options": ["specific option 1", "specific option 2", "personal option", "another option"]
-    }
-  ]
-}`);
+  "questions": [{
+    "text": "Great - is this from a specific platform like YouTube or TikTok, or from multiple sources?",
+    "options": ["YouTube/Google ad revenue", "TikTok creator fund", "Ad revenue from multiple platforms", "Other"]
+  }]
+}
+
+EXAMPLE: If they said "Brand deal or sponsorship":
+{
+  "questions": [{
+    "text": "Got it, a brand deal from ${merchantName}. What type of content was this for?",
+    "options": ["Sponsored post/video", "Ongoing brand partnership", "Gifted items to review", "Event appearance or hosting"]
+  }]
+}
+
+EXAMPLE: If they typed a custom answer like "they paid me for a photoshoot":
+{
+  "questions": [{
+    "text": "A photoshoot payment from ${merchantName} - was this a one-off job or part of an ongoing arrangement?",
+    "options": ["One-off client job", "Ongoing contract/retainer", "Part of a brand deal", "Other"]
+  }]
+}
+
+If Q2 answer was "Other" or unclear → Ask ONE text input question:
+{
+  "questions": [{
+    "text": "Can you briefly describe what ${merchantName} paid you for?",
+    "options": []
+  }]
+}
+
+CRITICAL: Your follow-up MUST acknowledge their previous answer naturally. Do NOT ask a generic question that ignores what they said.
+
+Respond with ONLY valid JSON.`;
 
       const message = await anthropic.messages.create({
         model: "claude-sonnet-4-6",
@@ -749,331 +620,180 @@ Respond with ONLY valid JSON:
       return;
     }
 
-    // EXPENSE FLOW - Original flow for expenses
-    const prompt = hasPreviousAnswers
-      ? (numAnswered === 1
-        ? `You are a UK tax assistant helping a ${workTypeDesc} categorize expenses.
+    // EXPENSE FLOW
+    const merchantName = transaction.merchant_name || transaction.name;
+    const amount = Math.abs(transaction.amount);
+    const previousAnswersStr = JSON.stringify(previousAnswers, null, 2);
 
-USER PROFILE:
-- Work type: ${workTypeDesc}
-- Monthly income: £${userProfile?.monthly_income || 'unknown'}
-- Time commitment: ${userProfile?.time_commitment || 'unknown'}
-- Receives gifted items: ${userProfile?.receives_gifted_items ? 'Yes' : 'No'}
+    const prompt = !hasPreviousAnswers
+      ? `You are a friendly UK tax assistant helping a ${workTypeDesc} categorize a bank transaction. Be conversational, not robotic.
 
-TRANSACTION:
-- Merchant: ${transaction.merchant_name || transaction.name}
-- Amount: £${Math.abs(transaction.amount)}
-- Date: ${transaction.date}
-- Plaid Category: ${transaction.category?.join(', ') || 'Unknown'}
+TRANSACTION: £${amount} spent at "${merchantName}" on ${transaction.date}
+USER: ${workTypeDesc}, earns ~£${userProfile?.monthly_income || 'unknown'}/month${userProfile?.receives_gifted_items ? ', receives gifted items' : ''}
 
-PREVIOUS ANSWER TO Q1 ("What did you buy?"):
-${JSON.stringify(previousAnswers, null, 2)}
+YOUR TASK: Ask ONE smart opening question about this specific purchase.
 
-YOUR GOAL: Detect if Q1 is SINGLE ITEM or MULTIPLE ITEMS, then generate appropriate Q2.
+RULES:
+- Your question MUST reference the merchant name and/or amount naturally
+- Do NOT use generic questions like "What did you buy?" - make it specific to the merchant
+- Infer what they likely bought from the merchant name and amount
+- Provide 4 options that are specific to what this merchant actually sells
+- Include both single-item and multiple-items options where relevant
 
-STEP 1: Analyze Q1 answer - is it single or multiple?
+EXAMPLES of good contextual questions:
 
-SINGLE ITEM indicators:
-- Specific product names: "Laptop", "Foundation", "Camera", "Coffee", "Ring light"
-- Singular items: "A bike", "Phone", "Sandwich"
-- Specific equipment/supplies
-
-MULTIPLE ITEMS indicators:
-- Shopping language: "Weekly food shop", "Big shop", "Shopping", "Groceries"
-- Plural/multiple: "Multiple items", "Various things", "Several products", "Mix of..."
-- Generic: "Household essentials", "Weekly shop (multiple items)"
-
-STEP 2: Generate Q2 based on detection:
-
-IF SINGLE ITEM:
-Q2: "What will you use this [item] for?" OR "What is this [item] for?"
-- Reference the specific item from Q1
-- Include 4 options with HMRC-accurate scenarios
-- Mix of personal AND business options
-
-Example - Q1 answer: "Foundation"
-Q2: "What is this foundation for?"
-- "To review or feature in a video" (100% business)
-- "To wear for work events/filming" (personal - HMRC: personal grooming)
-- "Everyday personal use" (personal)
-- "As props for set dressing" (100% business)
-
-Example - Q1 answer: "Laptop"
-Q2: "What will you use this laptop for?"
-- "Personal use and entertainment" (personal)
-- "Editing videos/content for my channel" (100% business)
-- "Work and personal use" (100% business - bought for business)
-- "Running my business" (100% business)
-
-IF MULTIPLE ITEMS:
-Q2: Ask if ANY were for business (personalized to work type)
-
-Work type: content_creation
-Q2: "Did any of this include items for your content?"
-- "No, all personal"
-- "Yes - all for my content"
-- "Yes - some items were for content"
-
-Work type: freelancing
-Q2: "Did any of this include items for client work or projects?"
-- "No, all personal"
-- "Yes - all for my work"
-- "Yes - some items were for work"
-
-Work type: side_hustle
-Q2: "Did any of this include items for your side hustle?"
-- "No, all personal"
-- "Yes - all for my side hustle"
-- "Yes - some items were for my side hustle"
-
-Work type: (other)
-Q2: "Did any of this include items for your business?"
-- "No, all personal"
-- "Yes - all for my business"
-- "Yes - some items were for business"
-
-IMPORTANT:
-- Analyze the Q1 answer text to detect single vs multiple
-- Use friendly, personalized language based on ${workTypeDesc}
-- Always return exactly ONE question
-
-CRITICAL: Respond with ONLY valid JSON. No text before or after. Start with { and end with }.
-
+£4.50 at "STARBUCKS" for a content creator:
 {
-  "questions": [
-    {
-      "text": "Contextual Q2 referencing the item from Q1",
-      "options": ["personal scenario", "business scenario", "another option", "fourth option"]
-    }
-  ]
+  "questions": [{
+    "text": "£4.50 at Starbucks - was this just a coffee, or did you grab food too?",
+    "options": ["Just a coffee/drink", "Coffee and food", "Drinks for a meeting", "Multiple items"]
+  }]
 }
 
-OR if asking text input question:
-
+£47.50 at "BOOTS" for a content creator:
 {
-  "questions": [
-    {
-      "text": "What did you buy for your content and approximately how much did those items cost in total?",
-      "options": []
-    }
-  ]
-}`
-        : `You are a UK tax assistant helping a ${workTypeDesc} categorize expenses.
+  "questions": [{
+    "text": "£47.50 at Boots - what did you pick up?",
+    "options": ["Makeup or beauty products", "Skincare", "Health/pharmacy items", "A mix of different things"]
+  }]
+}
 
-USER PROFILE:
-- Work type: ${workTypeDesc}
-- Monthly income: £${userProfile?.monthly_income || 'unknown'}
-- Time commitment: ${userProfile?.time_commitment || 'unknown'}
-- Receives gifted items: ${userProfile?.receives_gifted_items ? 'Yes' : 'No'}
+£899.00 at "CURRYS" for a freelancer:
+{
+  "questions": [{
+    "text": "£899 at Currys - that looks like a big purchase. What did you get?",
+    "options": ["Laptop or computer", "Monitor or display", "Phone or tablet", "Multiple items or accessories"]
+  }]
+}
 
-TRANSACTION:
-- Merchant: ${transaction.merchant_name || transaction.name}
-- Amount: £${Math.abs(transaction.amount)}
-- Date: ${transaction.date}
-- Plaid Category: ${transaction.category?.join(', ') || 'Unknown'}
+£62.30 at "TESCO" for a side hustler:
+{
+  "questions": [{
+    "text": "£62.30 at Tesco - was this a regular food shop or something specific?",
+    "options": ["Weekly food shop", "Specific items for a project", "Household essentials", "A mix of groceries and other things"]
+  }]
+}
 
-PREVIOUS ANSWERS:
-${JSON.stringify(previousAnswers, null, 2)}
+£29.99 at "ADOBE" for a content creator:
+{
+  "questions": [{
+    "text": "£29.99 to Adobe - is this a subscription you use for your content?",
+    "options": ["Yes, for editing (Premiere, Lightroom, etc.)", "Yes, but mostly personal use", "No, this is personal", "It's for both work and personal"]
+  }]
+}
+
+Respond with ONLY valid JSON. No text before or after.`
+      : (numAnswered === 1
+        ? `You are a friendly UK tax assistant helping a ${workTypeDesc} categorize expenses. Be conversational.
+
+TRANSACTION: £${amount} at "${merchantName}" on ${transaction.date}
+USER: ${workTypeDesc}
+
+CONVERSATION SO FAR:
+${previousAnswersStr}
+
+YOUR TASK: Based on their answer, ask a smart follow-up that acknowledges what they told you.
+
+RULES:
+- Your question MUST reference their previous answer naturally - show you understood what they said
+- If they typed a custom answer, acknowledge the specific details they mentioned
+- Determine if the item is SINGLE or MULTIPLE, and ask accordingly
+
+FOR SINGLE ITEMS: Ask what they'll use it for, referencing the specific item.
+
+EXAMPLE: User said "Ring light"
+{
+  "questions": [{
+    "text": "Nice - is the ring light for filming your content, or personal use?",
+    "options": ["For filming/creating content", "For video calls at my day job", "Personal use", "A bit of both"]
+  }]
+}
+
+EXAMPLE: User typed "hair extensions for a photoshoot"
+{
+  "questions": [{
+    "text": "You mentioned hair extensions for a photoshoot - was this entirely for the shoot, or do you wear them day-to-day too?",
+    "options": ["Only for the photoshoot/content", "Mostly for content but I wear them generally", "I wear them all the time, just happened to use them for a shoot", "They were a one-off for this specific job"]
+  }]
+}
+
+EXAMPLE: User said "Laptop"
+{
+  "questions": [{
+    "text": "What will you mainly use the laptop for?",
+    "options": ["Editing content/running my business", "Personal use and entertainment", "Both work and personal", "Replacing an old work laptop"]
+  }]
+}
+
+FOR MULTIPLE ITEMS: Ask if any were for business, personalized to their work type.
+
+EXAMPLE: User said "Weekly food shop"
+{
+  "questions": [{
+    "text": "Was any of the food shop for your ${workTypeDesc === 'content creator' ? 'content' : workTypeDesc === 'freelancer' ? 'work' : 'business'}, or all personal?",
+    "options": ["All personal", "All for my ${workTypeDesc === 'content creator' ? 'content' : 'work'}", "Some items were for ${workTypeDesc === 'content creator' ? 'content' : 'work'}"]
+  }]
+}
+
+EXAMPLE: User typed "bought ingredients for a recipe video and normal groceries"
+{
+  "questions": [{
+    "text": "You mentioned recipe video ingredients mixed with normal groceries - roughly how much of the £${amount} was for the video ingredients?",
+    "options": []
+  }]
+}
+
+CRITICAL: Your question MUST show you read and understood their answer. Never ask a generic follow-up.
+
+Respond with ONLY valid JSON.`
+        : `You are a friendly UK tax assistant helping a ${workTypeDesc} categorize expenses. Be conversational.
+
+TRANSACTION: £${amount} at "${merchantName}" on ${transaction.date}
+USER: ${workTypeDesc}
+
+CONVERSATION SO FAR:
+${previousAnswersStr}
 
 NUMBER OF ANSWERS: ${numAnswered}
 
-YOUR GOAL: Check if we have enough info to categorize. ALMOST NEVER ask follow-up questions.
+YOUR TASK: Decide if we have enough info, or ask ONE final follow-up.
 
-CRITICAL: If we already have 3 or more answers, STOP. Return empty questions array [] - we have enough info!
+CRITICAL: If we have 3+ answers, ALWAYS return {"questions": []} - we have enough.
 
-Ask a follow-up in these 2 cases ONLY (and only if we have fewer than 3 answers):
+ONLY ask a follow-up for these cases (and only if <3 answers):
 
-1. VEHICLE/MILEAGE TRACKING:
-   If they said VEHICLE for business use AND we've only asked 2 questions so far:
-   - "Delivery work", "Business travel", "Courier work", "Bike for deliveries"
-   → Ask ONCE about mileage tracking (important for HMRC)
+1. MIXED SHOPPING ("some items", "some things", "Yes - some"):
+   → Ask a TEXT INPUT question (options: []) asking what they bought for work and roughly how much it cost
+   → Your question MUST reference their previous answers
 
-   But if we already asked the mileage question (3 answers), DO NOT ask again!
+   EXAMPLE: Previous answers mention "some items were for content" from a Tesco shop:
+   {
+     "questions": [{
+       "text": "What did you pick up for your content from Tesco, and roughly how much did those items cost?",
+       "options": []
+     }]
+   }
 
-2. MIXED SHOPPING - CRITICAL - "some items":
-   If Q2 answer contains ANY of: "some items", "some things", "Yes - some", "some of"
-   → MUST ask ONE TEXT INPUT QUESTION (no options):
+2. VEHICLE for business use:
+   → Ask about mileage tracking (important for HMRC)
 
-   For content_creation: "What did you buy for your content and approximately how much did those items cost in total?"
-   For freelancing: "What did you buy for your work and approximately how much did those items cost in total?"
-   For side_hustle: "What did you buy for your side hustle and approximately how much did those items cost in total?"
-   For general: "What did you buy for your business and approximately how much did those items cost in total?"
+   EXAMPLE: They said a bike is for delivery work:
+   {
+     "questions": [{
+       "text": "Since you use the bike for deliveries, do you track your business mileage?",
+       "options": ["Yes, I keep a mileage log", "No, but I can estimate", "I use it for all my deliveries", "I don't track it"]
+     }]
+   }
 
-   Options: [] (empty array - user will type freely)
+3. ALL OTHER CASES → return {"questions": []}
 
-   Example user input: "Foundation for filming and ring light - about £45 total"
+No follow-up needed examples:
+- "All personal" → done
+- "All for my content" → done
+- Single item + clear purpose → done
+- Custom answer with enough detail → done
 
-   IMPORTANT: If they said "some items" you MUST ask this question. DO NOT proceed to categorization without getting the details and cost.
-
-3. ALL OTHER CASES:
-   → Return empty questions array [] - we have enough info!
-
-   Examples of NO follow-up needed:
-   - "No, all personal" → Categorize as personal
-   - "Yes - all for my content" → Categorize as 100% business
-   - Single product answered → Categorize based on purpose
-   - Already have 3 answers → ALWAYS stop, proceed to categorization
-   - Mileage question already answered → Proceed to categorization
-
-HANDLE AUTOMATICALLY (no questions):
-- Home office: Use HMRC simplified expenses (£6/week for working from home)
-- Equipment: 100% business if bought for business
-- Phone/internet: 100% business if mentioned for work
-- Single-purpose items: laptop, makeup to review, coffee for meeting, etc.
-
-EXAMPLES - NO FOLLOW-UP NEEDED:
-- "Laptop" + "For work" → NO FOLLOW-UP (100% business)
-- "Camera" + "Content creation" → NO FOLLOW-UP (100% business)
-- "Makeup" + "To review in video" → NO FOLLOW-UP (100% business)
-- "Foundation" + "Personal use" → NO FOLLOW-UP (0% personal)
-- "Coffee" + "Business meeting" → NO FOLLOW-UP (50% by HMRC rule)
-
-EXAMPLES - FOLLOW-UP NEEDED:
-
-Mixed shopping with "some items":
-- Q1="Weekly food shop" Q2="Did any of this include items for your content?" A="Yes - some items were for content"
-  → ASK Q3 (text input, no options): "What did you buy for your content and approximately how much did those items cost in total?"
-  User types: "Foundation for filming and ring light - about £45 total"
-
-Vehicle mileage:
-- Q1="Bike" Q2="What will you use this bike for?" A="Delivery work"
-  → ASK Q3: "Do you track your business mileage?"
-  - "Yes, I keep a mileage log"
-  - "No, but I can estimate"
-  - "I use it for all my deliveries"
-  - "I don't track it"
-
-IMPORTANT: Single-purpose transactions need NO follow-up. Only ask for mixed shopping or vehicles.
-
-RESPONSE RULES:
-- Generate ONLY 1 NEW question
-- Make it specific to their previous answer
-- Include options for most questions
-- For text input questions (where user describes items/costs), return empty options array []
-
-EXAMPLES:
-
-Previous: Q1="Weekly food shop" Q2="Did any of this include items for your content?" A="Yes - some items were for content"
-Next question (text input): "What did you buy for your content and approximately how much did those items cost in total?"
-Options: [] (empty - user types freely)
-
-Previous: Q1="Weekly food shop" Q2="Did any of this include items for your content?" A="No, all personal"
-Next question: [] (empty - proceed to categorization as 100% personal)
-
-Previous: Q1="Weekly food shop" Q2="Did any of this include items for your content?" A="Yes - all for my content"
-Next question: [] (empty - proceed to categorization as 100% business)
-
-Previous: Q1="Bike" Q2="Delivery/business travel"
-Next question: "Do you track your business mileage?"
-- "Yes, I keep a mileage log"
-- "No, but I can estimate"
-- "I use it for all my deliveries"
-- "I don't track it"
-
-Previous: Q1="Foundation" Q2="To review in a video"
-Next question: NONE - 100% business, proceed to categorization
-
-Previous: Q1="Laptop" Q2="For work and some personal use"
-Next question: NONE - Bought with business intent = 100% business
-
-Previous: Q1="Camera" Q2="Creating content"
-Next question: NONE - 100% business
-
-CRITICAL: Respond with ONLY valid JSON. No text before or after. Start with { and end with }.
-
-If asking text input question (e.g., for "some items"):
-{
-  "questions": [
-    {
-      "text": "What did you buy for your content and approximately how much did those items cost in total?",
-      "options": []
-    }
-  ]
-}
-
-If asking options question (e.g., mileage):
-{
-  "questions": [
-    {
-      "text": "Do you track your business mileage?",
-      "options": ["Yes, I keep a mileage log", "No, but I can estimate", "I use it for all my deliveries", "I don't track it"]
-    }
-  ]
-}
-
-If no more questions needed:
-{
-  "questions": []
-}`)
-      : `You are a UK tax assistant helping a ${workTypeDesc} categorize expenses.
-
-USER PROFILE:
-- Work type: ${workTypeDesc}
-- Monthly income: £${userProfile?.monthly_income || 'unknown'}
-- Time commitment: ${userProfile?.time_commitment || 'unknown'}
-- Receives gifted items: ${userProfile?.receives_gifted_items ? 'Yes' : 'No'}
-
-TRANSACTION:
-- Merchant: ${transaction.merchant_name || transaction.name}
-- Amount: £${Math.abs(transaction.amount)}
-- Date: ${transaction.date}
-- Plaid Category: ${transaction.category?.join(', ') || 'Unknown'}
-
-YOUR GOAL: Generate Q1 ONLY - ask what they bought.
-
-QUESTION 1: "What did you buy?"
-- Generate 4 SPECIFIC suggestions based on:
-  * The merchant name (${transaction.merchant_name || transaction.name})
-  * The transaction amount (£${Math.abs(transaction.amount)})
-  * What this merchant typically sells
-  * Include BOTH specific items AND general shopping options
-  * Include BOTH personal AND business-relevant items for a ${workTypeDesc}
-
-EXAMPLES:
-
-Boots (£25):
-Q1: "What did you buy?"
-- "Makeup/foundation"
-- "Skincare products"
-- "Weekly shop (multiple items)"
-- "Health/pharmacy items"
-
-Starbucks (£4.50):
-Q1: "What did you buy?"
-- "Coffee/drink"
-- "Coffee + food"
-- "Multiple drinks/snacks"
-- "Meeting with food/drinks"
-
-Currys (£300):
-Q1: "What did you buy?"
-- "Laptop/computer"
-- "Camera/video equipment"
-- "Phone/tablet"
-- "Multiple items/accessories"
-
-Tesco (£45):
-Q1: "What did you buy?"
-- "Weekly food shop"
-- "Specific ingredients"
-- "Household essentials"
-- "Mix of groceries/other items"
-
-IMPORTANT RULES:
-- Always include at least one "multiple items" or "shopping" option
-- Include specific single item suggestions
-- Make suggestions specific to what this merchant sells
-- Include BOTH personal AND business-relevant options
-
-Respond with ONLY valid JSON with ONE question:
-{
-  "questions": [
-    {
-      "text": "What did you buy?",
-      "options": ["specific option 1", "specific option 2", "multiple items option", "specific option 4"]
-    }
-  ]
-}`;
+Respond with ONLY valid JSON.`);
 
     const message = await anthropic.messages.create({
       model: "claude-sonnet-4-6", // Use Haiku for faster question generation
@@ -1128,69 +848,41 @@ app.post('/api/bulk_generate_first_questions', requireAuth, rateLimit(10, 60000)
     const generateQ1 = async (transaction) => {
       const isIncome = transaction.amount < 0;
 
+      const merchantName = transaction.merchant_name || transaction.name;
+      const amt = Math.abs(transaction.amount);
+
       const prompt = isIncome
-        ? `You are a UK tax assistant helping a ${workTypeDesc} (${businessStructureDesc}) categorize income.
+        ? `You are a friendly UK tax assistant helping a ${workTypeDesc} categorize a bank transaction. Be conversational.
 
-TRANSACTION (INCOME):
-- Merchant/Payer: ${transaction.merchant_name || transaction.name}
-- Amount: £${Math.abs(transaction.amount)}
-- Date: ${transaction.date}
+TRANSACTION: £${amt} received from "${merchantName}" on ${transaction.date}
+USER: ${workTypeDesc}
 
-YOUR GOAL: Generate Q1 ONLY - ask what this income is for.
-
-QUESTION 1: "What is this income for?"
-- Generate 4 SPECIFIC suggestions based on:
-  * The merchant/payer name (${transaction.merchant_name || transaction.name})
-  * The transaction amount (£${Math.abs(transaction.amount)})
-  * What this ${workTypeDesc} typically receives income from
-  * Include BOTH business AND personal income options
-
-IMPORTANT RULES:
-- Make suggestions specific to the payer name and amount
-- ALWAYS include personal/non-business options like:
-  * "Friend/family paying me back"
-  * "Personal transfer"
-  * "Gift"
-  * "Reimbursement"
-- If the amount looks like a regular salary (e.g., round numbers like £1500-£6000, or from company names), include:
-  * "PAYE salary from my employer"
-- Include common business income for ${workTypeDesc}
-- Provide exactly 4-5 options
+Ask ONE smart opening question about this specific payment. Your question MUST reference the merchant name and/or amount naturally. Do NOT use generic questions like "What is this income for?"
+- Provide 4-5 specific options including at least one personal option (friend paying back, gift, etc.)
+- If amount looks like salary (round £1,500-£6,000, or from a company), include PAYE salary option
 
 Respond with ONLY valid JSON:
 {
-  "questions": [
-    {
-      "text": "What is this income for?",
-      "options": ["specific option 1", "specific option 2", "personal option", "another option"]
-    }
-  ]
+  "questions": [{
+    "text": "contextual question referencing ${merchantName} and/or £${amt}",
+    "options": ["specific option 1", "specific option 2", "personal option", "another option"]
+  }]
 }`
-        : `You are a UK tax assistant helping a ${workTypeDesc} (${businessStructureDesc}) categorize expenses.
+        : `You are a friendly UK tax assistant helping a ${workTypeDesc} categorize a bank transaction. Be conversational.
 
-TRANSACTION:
-- Merchant: ${transaction.merchant_name || transaction.name}
-- Amount: £${Math.abs(transaction.amount)}
-- Date: ${transaction.date}
+TRANSACTION: £${amt} spent at "${merchantName}" on ${transaction.date}
+USER: ${workTypeDesc}
 
-YOUR GOAL: Generate Q1 ONLY - ask what they bought.
+Ask ONE smart opening question about this specific purchase. Your question MUST reference the merchant name and/or amount naturally. Do NOT use generic questions like "What did you buy?"
+- Provide 4 specific options based on what ${merchantName} actually sells
+- Include both single-item and multiple-items options where relevant
 
-QUESTION 1: "What did you buy?"
-- Generate 4 SPECIFIC suggestions based on:
-  * The merchant name (${transaction.merchant_name || transaction.name})
-  * The transaction amount (£${Math.abs(transaction.amount)})
-  * What this merchant typically sells
-  * Include BOTH specific items AND general shopping options
-  * Include BOTH personal AND business-relevant items for a ${workTypeDesc}
-
-Respond with ONLY valid JSON with ONE question:
+Respond with ONLY valid JSON:
 {
-  "questions": [
-    {
-      "text": "What did you buy?",
-      "options": ["specific option 1", "specific option 2", "multiple items option", "specific option 4"]
-    }
-  ]
+  "questions": [{
+    "text": "contextual question referencing ${merchantName} and/or £${amt}",
+    "options": ["specific option 1", "specific option 2", "multiple items option", "specific option 4"]
+  }]
 }`;
 
       try {
