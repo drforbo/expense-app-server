@@ -49,114 +49,91 @@ const supabaseAdmin = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
+// Authentication middleware — verifies Supabase JWT and ensures user_id matches
+const requireAuth = async (req, res, next) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'Missing authorization token' });
+    }
+
+    const token = authHeader.replace('Bearer ', '');
+    const { data: { user }, error } = await supabaseAdmin.auth.getUser(token);
+
+    if (error || !user) {
+      return res.status(401).json({ error: 'Invalid or expired token' });
+    }
+
+    // Attach verified user to request
+    req.user = user;
+
+    // If request includes user_id, verify it matches the authenticated user
+    const requestUserId = req.body?.user_id || req.query?.user_id;
+    if (requestUserId && requestUserId !== user.id) {
+      return res.status(403).json({ error: 'Not authorized to access this data' });
+    }
+
+    // Auto-inject user_id if not provided
+    if (req.body && !req.body.user_id) {
+      req.body.user_id = user.id;
+    }
+
+    next();
+  } catch (err) {
+    console.error('Auth middleware error:', err);
+    return res.status(401).json({ error: 'Authentication failed' });
+  }
+};
+
+// Rate limiting - simple in-memory limiter for AI-heavy endpoints
+const rateLimits = new Map();
+const rateLimit = (maxRequests, windowMs) => (req, res, next) => {
+  const userId = req.user?.id || req.ip;
+  const key = `${userId}:${req.path}`;
+  const now = Date.now();
+  const record = rateLimits.get(key) || { count: 0, resetAt: now + windowMs };
+
+  if (now > record.resetAt) {
+    record.count = 0;
+    record.resetAt = now + windowMs;
+  }
+
+  record.count++;
+  rateLimits.set(key, record);
+
+  if (record.count > maxRequests) {
+    return res.status(429).json({ error: 'Too many requests. Please try again later.' });
+  }
+  next();
+};
+
 // ============================================
 // PDF BANK STATEMENT UPLOAD & TRANSACTION EXTRACTION
 // ============================================
 
-// Helper: parse Claude's JSON response, handling truncation and markdown wrapping
-function parseTransactionJSON(responseText, label) {
-  let cleaned = responseText.replace(/```json\n?/gi, '').replace(/```\n?/g, '').trim();
-
-  // Handle truncated response — close the array at the last complete object
-  if (cleaned.startsWith('[') && !cleaned.trim().endsWith(']')) {
-    console.log(`⚠️ ${label} response truncated, attempting to fix...`);
-    const lastComplete = cleaned.lastIndexOf('},');
-    if (lastComplete > 0) {
-      cleaned = cleaned.substring(0, lastComplete + 1) + ']';
-    } else {
-      const lastBrace = cleaned.lastIndexOf('}');
-      if (lastBrace > 0) {
-        cleaned = cleaned.substring(0, lastBrace + 1) + ']';
-      }
-    }
-  }
-
-  const jsonMatch = cleaned.match(/\[[\s\S]*\]/);
-  if (!jsonMatch) {
-    console.error(`❌ No JSON array found in ${label} response`);
-    return [];
-  }
-
-  try {
-    return JSON.parse(jsonMatch[0]);
-  } catch (e) {
-    console.error(`❌ JSON parse error in ${label}:`, e.message);
-    return [];
-  }
-}
-
-// Extract transactions from a batch of PDF pages using Claude's native PDF support
-async function extractTransactionsFromPageBatch(base64PDF, startPage, endPage, totalPages) {
-  const label = `pages ${startPage}-${endPage}`;
-  console.log(`📄 Processing ${label} of ${totalPages}...`);
-
-  const message = await anthropic.messages.create({
-    model: "claude-haiku-4-5-20251001",
-    max_tokens: 8192,
-    messages: [{
-      role: "user",
-      content: [
-        {
-          type: "document",
-          source: {
-            type: "base64",
-            media_type: "application/pdf",
-            data: base64PDF,
-          },
-        },
-        {
-          type: "text",
-          text: `You are a bank statement parser. Extract ALL individual transactions from PAGES ${startPage} to ${endPage} of this bank statement PDF. IGNORE all other pages.
-
-IMPORTANT RULES:
-1. Extract EVERY SINGLE transaction on pages ${startPage}-${endPage} - do not skip any, do not summarize
-2. For amount: Use POSITIVE numbers for money going OUT (debits/expenses/purchases), NEGATIVE numbers for money coming IN (credits/income/deposits)
-3. For dates: Convert to YYYY-MM-DD format. If year is missing, assume current year or most recent past year
-4. For merchant_name: Clean up the name - remove card numbers, reference codes, extract the actual merchant/payee name
-5. Skip ONLY: balance entries, opening balances, closing balances, statement headers
-6. Include ALL: purchases, payments, transfers, direct debits, standing orders, card payments, ATM withdrawals
-7. Common UK bank formats: "DD MMM" or "DD/MM/YYYY" dates, amounts with £ symbol
-
-Respond with ONLY a valid JSON array. No explanation, no markdown, just raw JSON starting with [ and ending with ].
-
-Format:
-[{"merchant_name": "Tesco", "amount": 45.23, "transaction_date": "2024-01-15", "description": "Original transaction text"}]
-
-If no transactions found on these pages, respond with exactly: []`
-        }
-      ]
-    }]
-  });
-
-  return parseTransactionJSON(message.content[0].text, label);
-}
-
-// Main extraction: splits large PDFs into page batches for reliable extraction
+// Helper function to extract transactions directly from PDF buffer using Claude's native PDF support
 async function extractTransactionsFromPDF(pdfBuffer) {
   try {
     const base64PDF = pdfBuffer.toString('base64');
-    const pdfData = await pdfParse(pdfBuffer);
-    const pageCount = pdfData.numpages;
+    console.log(`📄 Sending PDF directly to Claude (${(pdfBuffer.length / 1024).toFixed(0)}KB)`);
 
-    console.log(`📄 PDF has ${pageCount} pages (${(pdfBuffer.length / 1024).toFixed(0)}KB)`);
-
-    const PAGES_PER_BATCH = 5;
-
-    // Small PDFs — process in one go
-    if (pageCount <= PAGES_PER_BATCH) {
-      const message = await anthropic.messages.create({
-        model: "claude-haiku-4-5-20251001",
-        max_tokens: 8192,
-        messages: [{
-          role: "user",
-          content: [
-            {
-              type: "document",
-              source: { type: "base64", media_type: "application/pdf", data: base64PDF },
+    const message = await anthropic.messages.create({
+      model: "claude-sonnet-4-6",
+      max_tokens: 16000,
+      messages: [{
+        role: "user",
+        content: [
+          {
+            type: "document",
+            source: {
+              type: "base64",
+              media_type: "application/pdf",
+              data: base64PDF,
             },
-            {
-              type: "text",
-              text: `You are a bank statement parser. Extract ALL individual transactions from this bank statement PDF.
+          },
+          {
+            type: "text",
+            text: `You are a bank statement parser. Extract ALL individual transactions from this bank statement PDF.
 
 IMPORTANT RULES:
 1. Extract EVERY SINGLE transaction - do not skip any, do not summarize
@@ -173,49 +150,23 @@ Format:
 [{"merchant_name": "Tesco", "amount": 45.23, "transaction_date": "2024-01-15", "description": "Original transaction text"}]
 
 If no transactions found, respond with exactly: []`
-            }
-          ]
-        }]
-      });
-
-      const transactions = parseTransactionJSON(message.content[0].text, 'single batch');
-      console.log(`✅ Extracted ${transactions.length} transactions from PDF`);
-      return transactions;
-    }
-
-    // Large PDFs — process in page batches (2 concurrent)
-    const batches = [];
-    for (let i = 1; i <= pageCount; i += PAGES_PER_BATCH) {
-      batches.push({ start: i, end: Math.min(i + PAGES_PER_BATCH - 1, pageCount) });
-    }
-
-    console.log(`📦 Split into ${batches.length} batches of ${PAGES_PER_BATCH} pages`);
-
-    const CONCURRENT = 4;
-    let allTransactions = [];
-
-    for (let i = 0; i < batches.length; i += CONCURRENT) {
-      const batchSlice = batches.slice(i, i + CONCURRENT);
-      const results = await Promise.all(
-        batchSlice.map(b => extractTransactionsFromPageBatch(base64PDF, b.start, b.end, pageCount))
-      );
-      for (const txns of results) {
-        allTransactions = allTransactions.concat(txns);
-      }
-      console.log(`✅ Completed batches ${i + 1}-${Math.min(i + CONCURRENT, batches.length)} of ${batches.length}`);
-    }
-
-    // Deduplicate (page boundary overlaps)
-    const seen = new Set();
-    const unique = allTransactions.filter(txn => {
-      const key = `${txn.transaction_date}_${txn.amount}_${txn.merchant_name}`.toLowerCase().trim();
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
+          }
+        ]
+      }]
     });
 
-    console.log(`✅ Extracted ${unique.length} unique transactions (${allTransactions.length - unique.length} duplicates removed)`);
-    return unique;
+    let responseText = message.content[0].text;
+    responseText = responseText.replace(/```json\n?/gi, '').replace(/```\n?/g, '').trim();
+
+    const jsonMatch = responseText.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) {
+      console.error('❌ No JSON array found in Claude response');
+      return [];
+    }
+
+    const transactions = JSON.parse(jsonMatch[0]);
+    console.log(`✅ Extracted ${transactions.length} transactions from PDF`);
+    return transactions;
   } catch (error) {
     console.error('❌ Error extracting transactions from PDF:', error);
     throw error;
@@ -223,7 +174,7 @@ If no transactions found, respond with exactly: []`
 }
 
 // Upload and process bank statement PDF
-app.post('/api/upload_statement', upload.single('pdf'), async (req, res) => {
+app.post('/api/upload_statement', requireAuth, rateLimit(10, 60000), upload.single('pdf'), async (req, res) => {
   try {
     const { user_id } = req.body;
     const file = req.file;
@@ -279,71 +230,68 @@ app.post('/api/upload_statement', upload.single('pdf'), async (req, res) => {
 
     console.log(`📝 Statement record created: ${statement.id}`);
 
-    // 3. Respond immediately — process PDF in background
+    // 3. Extract transactions using Claude
+    console.log('🤖 Extracting transactions with AI...');
+    const transactions = await extractTransactionsFromPDF(file.buffer);
+
+    // 4. Save transactions with batch insert and deduplication
+    const validTransactions = transactions
+      .filter(txn => txn.merchant_name && txn.amount !== undefined && txn.transaction_date)
+      .map(txn => {
+        const hashInput = `${txn.transaction_date}_${txn.amount}_${txn.merchant_name}`.toLowerCase().trim();
+        const transactionHash = crypto.createHash('md5').update(hashInput).digest('hex');
+        return {
+          user_id,
+          statement_id: statement.id,
+          merchant_name: txn.merchant_name,
+          amount: parseFloat(txn.amount),
+          transaction_date: txn.transaction_date,
+          description: txn.description || null,
+          transaction_hash: transactionHash
+        };
+      });
+
+    let savedCount = 0;
+    let duplicateCount = 0;
+
+    // Batch insert in chunks of 100 for better performance
+    const BATCH_SIZE = 100;
+    for (let i = 0; i < validTransactions.length; i += BATCH_SIZE) {
+      const batch = validTransactions.slice(i, i + BATCH_SIZE);
+      const { data, error: insertError } = await supabaseAdmin
+        .from('uploaded_transactions')
+        .upsert(batch, {
+          onConflict: 'user_id,transaction_hash',
+          ignoreDuplicates: true
+        })
+        .select();
+
+      if (insertError) {
+        console.error('⚠️  Batch insert error:', insertError);
+      } else {
+        savedCount += data?.length || 0;
+      }
+    }
+
+    duplicateCount = validTransactions.length - savedCount;
+    console.log(`✅ Saved ${savedCount} transactions, ${duplicateCount} duplicates skipped`);
+
+    // 5. Update statement record with results
+    await supabaseAdmin
+      .from('bank_statements')
+      .update({
+        status: 'completed',
+        transaction_count: savedCount
+      })
+      .eq('id', statement.id);
+
     res.json({
       success: true,
       statement_id: statement.id,
-      status: 'processing',
+      transactions_found: transactions.length,
+      transactions_saved: savedCount,
+      duplicates_skipped: duplicateCount
     });
-
-    // 4. Background: Extract and save transactions
-    (async () => {
-      try {
-        console.log('🤖 Extracting transactions with AI...');
-        const transactions = await extractTransactionsFromPDF(file.buffer);
-
-        const validTransactions = transactions
-          .filter(txn => txn.merchant_name && txn.amount !== undefined && txn.transaction_date)
-          .map(txn => {
-            const hashInput = `${txn.transaction_date}_${txn.amount}_${txn.merchant_name}`.toLowerCase().trim();
-            const transactionHash = crypto.createHash('md5').update(hashInput).digest('hex');
-            return {
-              user_id,
-              statement_id: statement.id,
-              merchant_name: txn.merchant_name,
-              amount: parseFloat(txn.amount),
-              transaction_date: txn.transaction_date,
-              description: txn.description || null,
-              transaction_hash: transactionHash
-            };
-          });
-
-        let savedCount = 0;
-
-        const BATCH_SIZE = 100;
-        for (let i = 0; i < validTransactions.length; i += BATCH_SIZE) {
-          const batch = validTransactions.slice(i, i + BATCH_SIZE);
-          const { data, error: insertError } = await supabaseAdmin
-            .from('uploaded_transactions')
-            .upsert(batch, {
-              onConflict: 'user_id,transaction_hash',
-              ignoreDuplicates: true
-            })
-            .select();
-
-          if (insertError) {
-            console.error('⚠️  Batch insert error:', insertError);
-          } else {
-            savedCount += data?.length || 0;
-          }
-        }
-
-        const duplicateCount = validTransactions.length - savedCount;
-        console.log(`✅ Saved ${savedCount} transactions, ${duplicateCount} duplicates skipped`);
-
-        await supabaseAdmin
-          .from('bank_statements')
-          .update({ status: 'completed', transaction_count: savedCount })
-          .eq('id', statement.id);
-
-      } catch (bgError) {
-        console.error('❌ Background processing error:', bgError);
-        await supabaseAdmin
-          .from('bank_statements')
-          .update({ status: 'error' })
-          .eq('id', statement.id);
-      }
-    })();
 
   } catch (error) {
     console.error('❌ Error uploading statement:', error);
@@ -351,28 +299,28 @@ app.post('/api/upload_statement', upload.single('pdf'), async (req, res) => {
   }
 });
 
-// Check statement processing status
-app.post('/api/statement_status', async (req, res) => {
+// Poll statement processing status
+app.post('/api/statement_status', requireAuth, async (req, res) => {
   try {
     const { statement_id } = req.body;
-    if (!statement_id) return res.status(400).json({ error: 'statement_id is required' });
-
+    if (!statement_id) {
+      return res.status(400).json({ error: 'statement_id is required' });
+    }
     const { data, error } = await supabaseAdmin
       .from('bank_statements')
       .select('status, transaction_count')
       .eq('id', statement_id)
       .single();
-
     if (error) throw error;
     res.json(data);
   } catch (error) {
-    console.error('❌ Error checking statement status:', error);
+    console.error('Error checking statement status:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
 // Get list of uploaded statements for a user
-app.post('/api/get_statements', async (req, res) => {
+app.post('/api/get_statements', requireAuth, async (req, res) => {
   try {
     const { user_id } = req.body;
 
@@ -397,7 +345,7 @@ app.post('/api/get_statements', async (req, res) => {
 });
 
 // Get uncategorized transactions for a user
-app.post('/api/get_uncategorized_transactions', async (req, res) => {
+app.post('/api/get_uncategorized_transactions', requireAuth, async (req, res) => {
   try {
     const { user_id } = req.body;
 
@@ -472,7 +420,7 @@ app.post('/api/get_uncategorized_transactions', async (req, res) => {
 });
 
 // Generate contextual questions for a transaction
-app.post('/api/generate_questions', async (req, res) => {
+app.post('/api/generate_questions', requireAuth, rateLimit(30, 60000), async (req, res) => {
   try {
     const { transaction, userProfile, previousAnswers = {} } = req.body;
     console.log('❓ Generating questions for:', transaction.name || transaction.merchant_name);
@@ -1162,7 +1110,7 @@ Respond with ONLY valid JSON with ONE question:
 });
 
 // Bulk generate Q1 for multiple transactions (for pre-loading)
-app.post('/api/bulk_generate_first_questions', async (req, res) => {
+app.post('/api/bulk_generate_first_questions', requireAuth, rateLimit(10, 60000), async (req, res) => {
   try {
     const { transactions, userProfile } = req.body;
     console.log('⚡ Bulk generating Q1 for', transactions.length, 'transactions');
@@ -1304,7 +1252,7 @@ Respond with ONLY valid JSON with ONE question:
 });
 
 // Categorize transaction based on user's answers
-app.post('/api/categorize_from_answers', async (req, res) => {
+app.post('/api/categorize_from_answers', requireAuth, rateLimit(30, 60000), async (req, res) => {
   try {
     const { transaction, answers, userProfile } = req.body;
     console.log('🤖 Categorizing with answers:', transaction.name);
@@ -1890,7 +1838,7 @@ FOR SPLIT TRANSACTIONS (mixed shopping with business items):
 });
 
 // Bulk categorize all transactions at once
-app.post('/api/bulk_categorize', async (req, res) => {
+app.post('/api/bulk_categorize', requireAuth, rateLimit(10, 60000), async (req, res) => {
   try {
     const { transactions, userProfile, userId } = req.body;
     console.log('⚡ Bulk categorizing', transactions.length, 'transactions for user:', userId);
@@ -2051,7 +1999,7 @@ Respond with ONLY valid JSON:
 });
 
 // Re-categorize transaction based on user feedback
-app.post('/api/recategorize_with_feedback', async (req, res) => {
+app.post('/api/recategorize_with_feedback', requireAuth, rateLimit(20, 60000), async (req, res) => {
   try {
     const { transaction, answers, userProfile, currentCategorization, feedback } = req.body;
     console.log('🔄 Re-categorizing with feedback:', transaction.name);
@@ -2227,7 +2175,7 @@ Respond with ONLY valid JSON (no markdown, no explanations):
 }
 
 // NEW: Generate personalized onboarding guide
-app.post('/api/generate-guide', async (req, res) => {
+app.post('/api/generate-guide', requireAuth, rateLimit(5, 60000), async (req, res) => {
   try {
     const {
       workType,
@@ -2324,7 +2272,7 @@ app.post('/api/generate-guide', async (req, res) => {
 });
 
 // Get last export date for a user
-app.post('/api/get_last_export_date', async (req, res) => {
+app.post('/api/get_last_export_date', requireAuth, async (req, res) => {
   try {
     const { user_id } = req.body;
 
@@ -2351,7 +2299,7 @@ app.post('/api/get_last_export_date', async (req, res) => {
 });
 
 // Export categorized transactions to CSV
-app.post('/api/export_transactions', async (req, res) => {
+app.post('/api/export_transactions', requireAuth, async (req, res) => {
   try {
     const { user_id, start_date, end_date } = req.body;
 
@@ -2423,8 +2371,7 @@ app.post('/api/export_transactions', async (req, res) => {
       'Type',
       'HMRC Category',
       'Tax Deductible',
-      'Notes',
-      'Receipt / Evidence URL'
+      'Notes'
     ];
 
     // Generate CSV rows for transactions
@@ -2460,8 +2407,7 @@ app.post('/api/export_transactions', async (req, res) => {
         type,
         `"${txn.category_name || 'Uncategorized'}"`,
         txn.tax_deductible ? 'Yes' : 'No',
-        `"${notes}"`,
-        `"${txn.receipt_image_url || ''}"`
+        `"${notes}"`
       ].join(',');
     });
 
@@ -2484,8 +2430,7 @@ app.post('/api/export_transactions', async (req, res) => {
         'Income', // Type
         '"Gifted Item (Income)"', // Category
         'Yes', // Tax relevant
-        `"GIFTED ITEM: ${item.item_name} (RRP £${rrp.toFixed(2)})${item.received_from ? ' | From: ' + item.received_from : ''}${item.reason ? ' | Reason: ' + item.reason : ''} ${notes ? '- ' + notes : ''}"`,
-        `"${item.photo_url || ''}"`
+        `"GIFTED ITEM: ${item.item_name} (RRP £${rrp.toFixed(2)})${item.received_from ? ' | From: ' + item.received_from : ''}${item.reason ? ' | Reason: ' + item.reason : ''} ${notes ? '- ' + notes : ''}"`
       ].join(',');
     });
 
@@ -2519,7 +2464,7 @@ app.post('/api/export_transactions', async (req, res) => {
 });
 
 // GET endpoint for browser downloads (iOS Safari compatible)
-app.get('/api/download_transactions', async (req, res) => {
+app.get('/api/download_transactions', requireAuth, async (req, res) => {
   try {
     console.log('📥 Download transactions request received (GET)');
 
@@ -2617,8 +2562,7 @@ app.get('/api/download_transactions', async (req, res) => {
       'Tax Deductible',
       'Has Evidence',
       'Notes',
-      'User Answers',
-      'Receipt / Evidence URL'
+      'User Answers'
     ];
 
     // Generate CSV rows for transactions
@@ -2641,20 +2585,19 @@ app.get('/api/download_transactions', async (req, res) => {
         txn.tax_deductible ? 'Yes' : 'No',
         txn.qualified ? 'Yes' : 'No',
         `"${(txn.explanation || '').replace(/"/g, '""')}"`,
-        `"${formatUserAnswers(txn.user_answers)}"`,
-        `"${txn.receipt_image_url || ''}"`
+        `"${formatUserAnswers(txn.user_answers)}"`
       ].join(',');
     });
 
     // Generate CSV rows for gifted items
     const giftedRows = (giftedItems || []).map(item => {
-      const rrp = parseFloat(item.rrp) || 0;
+      const estimatedValue = item.estimated_value || 0;
 
       return [
         item.received_date,
-        `"${(item.received_from || item.item_name || 'Gifted Item').replace(/"/g, '""')}"`,
-        rrp.toFixed(2),
-        rrp.toFixed(2), // Business amount = total for gifted items
+        `"${(item.brand_company || 'Unknown').replace(/"/g, '""')}"`,
+        estimatedValue.toFixed(2),
+        estimatedValue.toFixed(2), // Business amount = total for gifted items
         '0.00', // Personal amount = 0 for gifted items
         '100', // Business % = 100% for gifted items
         'Income (Gifted)',
@@ -2662,8 +2605,7 @@ app.get('/api/download_transactions', async (req, res) => {
         'Taxable',
         'Yes', // Gifted items are always considered to have evidence (they're explicitly tracked)
         `"Item: ${(item.item_name || 'N/A').replace(/"/g, '""')}, From: ${(item.received_from || 'N/A').replace(/"/g, '""')}, Reason: ${(item.reason || 'N/A').replace(/"/g, '""')}"`,
-        '""', // Empty User Answers for gifted items
-        `"${item.photo_url || ''}"`
+        '""' // Empty User Answers for gifted items
       ].join(',');
     });
 
@@ -2705,7 +2647,7 @@ app.get('/api/download_transactions', async (req, res) => {
 // ============================================================================
 
 // Recognize item from image using AI vision
-app.post('/api/recognize_item', async (req, res) => {
+app.post('/api/recognize_item', requireAuth, rateLimit(10, 60000), async (req, res) => {
   try {
     const { image_base64 } = req.body;
 
@@ -2768,7 +2710,7 @@ If you cannot identify the item clearly, use your best judgment based on what yo
 });
 
 // Create a new gifted item
-app.post('/api/create_gifted_item', async (req, res) => {
+app.post('/api/create_gifted_item', requireAuth, async (req, res) => {
   try {
     const { user_id, item_name, rrp, photo_url, notes, received_date, received_from, reason } = req.body;
 
@@ -2807,7 +2749,7 @@ app.post('/api/create_gifted_item', async (req, res) => {
 });
 
 // Get all gifted items for a user
-app.post('/api/get_gifted_items', async (req, res) => {
+app.post('/api/get_gifted_items', requireAuth, async (req, res) => {
   try {
     const { user_id } = req.body;
 
@@ -2837,7 +2779,7 @@ app.post('/api/get_gifted_items', async (req, res) => {
 });
 
 // Update a gifted item
-app.post('/api/update_gifted_item', async (req, res) => {
+app.post('/api/update_gifted_item', requireAuth, async (req, res) => {
   try {
     const { id, item_name, rrp, photo_url, notes, received_date, received_from, reason } = req.body;
 
@@ -2878,7 +2820,7 @@ app.post('/api/update_gifted_item', async (req, res) => {
 });
 
 // Delete a gifted item
-app.post('/api/delete_gifted_item', async (req, res) => {
+app.post('/api/delete_gifted_item', requireAuth, async (req, res) => {
   try {
     const { id } = req.body;
 
@@ -2911,7 +2853,7 @@ app.post('/api/delete_gifted_item', async (req, res) => {
 // ============================================
 
 // Exchange authorization code for tokens and save connection
-app.post('/api/gmail/connect', async (req, res) => {
+app.post('/api/gmail/connect', requireAuth, async (req, res) => {
   try {
     const { code, userId } = req.body;
 
@@ -2963,7 +2905,7 @@ app.post('/api/gmail/connect', async (req, res) => {
 });
 
 // Get user's email connection status
-app.post('/api/gmail/status', async (req, res) => {
+app.post('/api/gmail/status', requireAuth, async (req, res) => {
   try {
     const { userId } = req.body;
 
@@ -2987,7 +2929,7 @@ app.post('/api/gmail/status', async (req, res) => {
 });
 
 // Disconnect Gmail
-app.post('/api/gmail/disconnect', async (req, res) => {
+app.post('/api/gmail/disconnect', requireAuth, async (req, res) => {
   try {
     const { userId } = req.body;
 
@@ -3009,7 +2951,7 @@ app.post('/api/gmail/disconnect', async (req, res) => {
 });
 
 // Search emails for receipts/invoices matching a transaction
-app.post('/api/gmail/search', async (req, res) => {
+app.post('/api/gmail/search', requireAuth, async (req, res) => {
   try {
     const { userId, transactionDate, merchantName, amount } = req.body;
 
@@ -3314,7 +3256,7 @@ function normalizeMerchantName(name) {
  * Update merchant pattern after a categorization
  * POST /api/update_merchant_pattern
  */
-app.post('/api/update_merchant_pattern', async (req, res) => {
+app.post('/api/update_merchant_pattern', requireAuth, async (req, res) => {
   try {
     const { user_id, transaction, categorization, categorization_source } = req.body;
 
@@ -3442,7 +3384,7 @@ app.post('/api/update_merchant_pattern', async (req, res) => {
  * Get categorization suggestions based on merchant history
  * POST /api/get_categorization_suggestions
  */
-app.post('/api/get_categorization_suggestions', async (req, res) => {
+app.post('/api/get_categorization_suggestions', requireAuth, async (req, res) => {
   try {
     const { user_id, transaction } = req.body;
 
@@ -3572,7 +3514,7 @@ app.post('/api/get_categorization_suggestions', async (req, res) => {
  * Detect subscription patterns from uncategorized transactions
  * POST /api/detect_subscriptions
  */
-app.post('/api/detect_subscriptions', async (req, res) => {
+app.post('/api/detect_subscriptions', requireAuth, async (req, res) => {
   try {
     const { user_id } = req.body;
 
@@ -3748,7 +3690,7 @@ app.post('/api/detect_subscriptions', async (req, res) => {
  * Confirm a subscription pattern and categorize all matching transactions
  * POST /api/confirm_subscription
  */
-app.post('/api/confirm_subscription', async (req, res) => {
+app.post('/api/confirm_subscription', requireAuth, async (req, res) => {
   try {
     const {
       user_id,
@@ -3840,7 +3782,7 @@ app.post('/api/confirm_subscription', async (req, res) => {
  * Reject a subscription pattern (don't show again)
  * POST /api/reject_subscription
  */
-app.post('/api/reject_subscription', async (req, res) => {
+app.post('/api/reject_subscription', requireAuth, async (req, res) => {
   try {
     const { user_id, subscription } = req.body;
 
@@ -3882,7 +3824,7 @@ app.post('/api/reject_subscription', async (req, res) => {
  * Get confirmed subscriptions for auto-categorization of new transactions
  * POST /api/get_confirmed_subscriptions
  */
-app.post('/api/get_confirmed_subscriptions', async (req, res) => {
+app.post('/api/get_confirmed_subscriptions', requireAuth, async (req, res) => {
   try {
     const { user_id } = req.body;
 
