@@ -156,11 +156,13 @@ If no transactions found, respond with exactly: []`
     });
 
     let responseText = message.content[0].text;
+    console.log(`📝 Claude response (first 500 chars): ${responseText.substring(0, 500)}`);
     responseText = responseText.replace(/```json\n?/gi, '').replace(/```\n?/g, '').trim();
 
     const jsonMatch = responseText.match(/\[[\s\S]*\]/);
     if (!jsonMatch) {
       console.error('❌ No JSON array found in Claude response');
+      console.error('📝 Full response:', responseText.substring(0, 1000));
       return [];
     }
 
