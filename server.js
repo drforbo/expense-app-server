@@ -2808,7 +2808,7 @@ Return JSON array:
 Only include emails that seem relevant. Return empty array [] if none match.`;
 
         const analysis = await anthropic.messages.create({
-          model: 'claude-sonnet-4-20250514',
+          model: 'claude-sonnet-4-6',
           max_tokens: 1000,
           messages: [{ role: 'user', content: analysisPrompt }]
         });
