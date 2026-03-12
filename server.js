@@ -931,9 +931,9 @@ Respond with ONLY valid JSON:
       }
     };
 
-    // Process in batches to avoid rate limits
-    const BATCH_SIZE = 20; // Sonnet handles larger batches reliably
-    const BATCH_DELAY = 1000; // 1 second delay between batches
+    // Process in batches to avoid rate limits (50 req/min on API)
+    const BATCH_SIZE = 8;
+    const BATCH_DELAY = 12000; // 12 second delay between batches (~40 req/min)
     const results = [];
 
     for (let i = 0; i < transactions.length; i += BATCH_SIZE) {
@@ -3233,7 +3233,7 @@ app.post('/api/detect_subscriptions', requireAuth, async (req, res) => {
 
     // Get all uploaded transactions (not yet categorized)
     const { data: allTransactions, error: txnError } = await supabaseAdmin
-      .from('transactions')
+      .from('uploaded_transactions')
       .select('*')
       .eq('user_id', user_id)
       .order('transaction_date', { ascending: true });
