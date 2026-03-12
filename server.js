@@ -37,6 +37,20 @@ const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
 });
 
+// Push notification helper (Expo Push API)
+async function sendPushNotification(expoPushToken, title, body) {
+  try {
+    await fetch('https://exp.host/--/api/v2/push/send', {
+      method: 'POST',
+      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ to: expoPushToken, sound: 'default', title, body }),
+    });
+    console.log('Push notification sent');
+  } catch (err) {
+    console.error('Failed to send push notification:', err);
+  }
+}
+
 // Initialize Supabase client (for regular operations with RLS)
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -188,10 +202,10 @@ If no transactions found, respond with exactly: []`
   }
 }
 
-// Upload and process bank statement PDF
+// Upload bank statement PDF (store only, no processing)
 app.post('/api/upload_statement', requireAuth, rateLimit(10, 60000), upload.single('pdf'), async (req, res) => {
   try {
-    const { user_id } = req.body;
+    const { user_id, bank_name, statement_month } = req.body;
     const file = req.file;
 
     if (!user_id) {
@@ -202,114 +216,62 @@ app.post('/api/upload_statement', requireAuth, rateLimit(10, 60000), upload.sing
       return res.status(400).json({ error: 'PDF file is required' });
     }
 
-    console.log(`📤 Uploading statement for user: ${user_id}`);
-    console.log(`📄 File: ${file.originalname}, Size: ${(file.size / 1024).toFixed(1)}KB`);
+    console.log(`Uploading statement for user: ${user_id}`);
+    console.log(`File: ${file.originalname}, Size: ${(file.size / 1024).toFixed(1)}KB`);
+    if (bank_name) console.log(`Bank: ${bank_name}`);
+    if (statement_month) console.log(`Month: ${statement_month}`);
 
     // 1. Upload PDF to Supabase Storage
-    const fileName = `${user_id}/${Date.now()}_${file.originalname}`;
+    const storagePath = `${user_id}/${Date.now()}_${file.originalname}`;
     const { data: uploadData, error: uploadError } = await supabaseAdmin.storage
       .from('bank-statements')
-      .upload(fileName, file.buffer, {
+      .upload(storagePath, file.buffer, {
         contentType: 'application/pdf',
         upsert: false
       });
 
     if (uploadError) {
-      console.error('❌ Storage upload error:', uploadError);
+      console.error('Storage upload error:', uploadError);
       throw new Error(`Failed to upload PDF: ${uploadError.message}`);
     }
 
     // Get public URL
     const { data: { publicUrl } } = supabaseAdmin.storage
       .from('bank-statements')
-      .getPublicUrl(fileName);
+      .getPublicUrl(storagePath);
 
-    console.log(`✅ PDF uploaded to storage: ${fileName}`);
+    console.log(`PDF uploaded to storage: ${storagePath}`);
 
-    // 2. Create statement record (status: processing)
+    // 2. Create statement record (status: pending — no processing yet)
     const { data: statement, error: stmtError } = await supabaseAdmin
       .from('bank_statements')
       .insert({
         user_id,
         filename: file.originalname,
         file_url: publicUrl,
-        status: 'processing'
+        storage_path: storagePath,
+        bank_name: bank_name || null,
+        statement_month: statement_month || null,
+        status: 'pending'
       })
       .select()
       .single();
 
     if (stmtError) {
-      console.error('❌ Error creating statement record:', stmtError);
+      console.error('Error creating statement record:', stmtError);
       throw stmtError;
     }
 
-    console.log(`📝 Statement record created: ${statement.id}`);
+    console.log(`Statement record created: ${statement.id} (pending)`);
 
-    // 3. Extract transactions using Claude
-    console.log('🤖 Extracting transactions with AI...');
-    const transactions = await extractTransactionsFromPDF(file.buffer);
-
-    // 4. Save transactions with batch insert and deduplication
-    const validTransactions = transactions
-      .filter(txn => txn.merchant_name && txn.amount !== undefined && txn.transaction_date)
-      .map(txn => {
-        const hashInput = `${txn.transaction_date}_${txn.amount}_${txn.merchant_name}`.toLowerCase().trim();
-        const transactionHash = crypto.createHash('md5').update(hashInput).digest('hex');
-        return {
-          user_id,
-          statement_id: statement.id,
-          merchant_name: txn.merchant_name,
-          amount: parseFloat(txn.amount),
-          transaction_date: txn.transaction_date,
-          description: txn.description || null,
-          transaction_hash: transactionHash
-        };
-      });
-
-    let savedCount = 0;
-    let duplicateCount = 0;
-
-    // Batch insert in chunks of 100 for better performance
-    const BATCH_SIZE = 100;
-    for (let i = 0; i < validTransactions.length; i += BATCH_SIZE) {
-      const batch = validTransactions.slice(i, i + BATCH_SIZE);
-      const { data, error: insertError } = await supabaseAdmin
-        .from('uploaded_transactions')
-        .upsert(batch, {
-          onConflict: 'user_id,transaction_hash',
-          ignoreDuplicates: true
-        })
-        .select();
-
-      if (insertError) {
-        console.error('⚠️  Batch insert error:', insertError);
-      } else {
-        savedCount += data?.length || 0;
-      }
-    }
-
-    duplicateCount = validTransactions.length - savedCount;
-    console.log(`✅ Saved ${savedCount} transactions, ${duplicateCount} duplicates skipped`);
-
-    // 5. Update statement record with results
-    await supabaseAdmin
-      .from('bank_statements')
-      .update({
-        status: 'completed',
-        transaction_count: savedCount
-      })
-      .eq('id', statement.id);
-
+    // Return immediately — no Claude processing
     res.json({
       success: true,
-      statement_id: statement.id,
-      transactions_found: transactions.length,
-      transactions_saved: savedCount,
-      duplicates_skipped: duplicateCount
+      statement_id: statement.id
     });
 
   } catch (error) {
-    console.error('❌ Error uploading statement:', error);
+    console.error('Error uploading statement:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -355,6 +317,511 @@ app.post('/api/get_statements', requireAuth, async (req, res) => {
 
   } catch (error) {
     console.error('❌ Error getting statements:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// BATCH PROCESSING & NEW STATEMENT ENDPOINTS
+// ============================================
+
+// Standalone Q1 generation helper (extracted from bulk_generate_first_questions)
+async function generateQ1ForTransaction(transaction, userProfile) {
+  const workTypeDesc = userProfile?.work_type === 'content_creation' ? 'content creator'
+    : userProfile?.work_type === 'freelancing' ? 'freelancer'
+    : userProfile?.work_type === 'side_hustle' ? 'side hustler'
+    : userProfile?.custom_work_type || 'self-employed';
+
+  const isIncome = transaction.amount < 0;
+  const merchantName = transaction.merchant_name || transaction.name;
+  const amt = Math.abs(transaction.amount);
+
+  const prompt = isIncome
+    ? `You are a friendly UK tax assistant helping a ${workTypeDesc} categorize a bank transaction. Be conversational.
+
+TRANSACTION: £${amt} received from "${merchantName}" on ${transaction.date}
+USER: ${workTypeDesc}
+
+Ask ONE smart opening question about this specific payment. Your question MUST reference the merchant name and/or amount naturally. Do NOT use generic questions like "What is this income for?"
+- Provide 4-5 specific options including at least one personal option (friend paying back, gift, etc.)
+- If amount looks like salary (round £1,500-£6,000, or from a company), include PAYE salary option
+
+Respond with ONLY valid JSON:
+{
+  "questions": [{
+    "text": "contextual question referencing ${merchantName} and/or £${amt}",
+    "options": ["specific option 1", "specific option 2", "personal option", "another option"]
+  }]
+}`
+    : `You are a friendly UK tax assistant helping a ${workTypeDesc} categorize a bank transaction. Be conversational.
+
+TRANSACTION: £${amt} spent at "${merchantName}" on ${transaction.date}
+USER: ${workTypeDesc}
+
+Ask ONE smart opening question about this specific purchase. Your question MUST reference the merchant name and/or amount naturally. Do NOT use generic questions like "What did you buy?"
+- Provide 4 specific options based on what ${merchantName} actually sells
+- Include both single-item and multiple-items options where relevant
+
+Respond with ONLY valid JSON:
+{
+  "questions": [{
+    "text": "contextual question referencing ${merchantName} and/or £${amt}",
+    "options": ["specific option 1", "specific option 2", "multiple items option", "specific option 4"]
+  }]
+}`;
+
+  try {
+    const message = await anthropic.messages.create({
+      model: "claude-sonnet-4-6",
+      max_tokens: 400,
+      messages: [{ role: "user", content: prompt }]
+    });
+
+    let responseText = message.content[0].text;
+    responseText = responseText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+
+    const firstBrace = responseText.indexOf('{');
+    const lastBrace = responseText.lastIndexOf('}');
+    if (firstBrace !== -1 && lastBrace !== -1 && firstBrace < lastBrace) {
+      responseText = responseText.substring(firstBrace, lastBrace + 1);
+    }
+
+    const result = JSON.parse(responseText);
+    return {
+      transaction_id: transaction.transaction_id,
+      questions: result.questions
+    };
+  } catch (error) {
+    console.error(`Error generating Q1 for ${merchantName}:`, error.message);
+    return {
+      transaction_id: transaction.transaction_id,
+      questions: null,
+      error: error.message
+    };
+  }
+}
+
+// Background batch processing function
+async function processStatementsInBackground(user_id) {
+  try {
+    console.log(`[Batch] Starting background processing for user: ${user_id}`);
+
+    // Find all pending statements for this user
+    const { data: pendingStatements, error: fetchError } = await supabaseAdmin
+      .from('bank_statements')
+      .select('*')
+      .eq('user_id', user_id)
+      .eq('status', 'pending')
+      .order('created_at', { ascending: true });
+
+    if (fetchError) {
+      console.error('[Batch] Error fetching pending statements:', fetchError);
+      return;
+    }
+
+    if (!pendingStatements || pendingStatements.length === 0) {
+      console.log('[Batch] No pending statements found');
+      return;
+    }
+
+    console.log(`[Batch] Found ${pendingStatements.length} pending statements`);
+
+    const allNewTransactionIds = [];
+    let processedCount = 0;
+    let failedCount = 0;
+
+    // Process statements SEQUENTIALLY to avoid rate limits
+    for (let i = 0; i < pendingStatements.length; i++) {
+      const stmt = pendingStatements[i];
+      console.log(`[Batch] Processing statement ${i + 1}/${pendingStatements.length}: ${stmt.filename}`);
+
+      try {
+        // Update status to processing
+        await supabaseAdmin
+          .from('bank_statements')
+          .update({ status: 'processing' })
+          .eq('id', stmt.id);
+
+        // Download the PDF from Supabase Storage
+        const storagePath = stmt.storage_path || extractStoragePath(stmt.file_url);
+        if (!storagePath) {
+          console.error(`[Batch] Cannot determine storage path for statement ${stmt.id}`);
+          await supabaseAdmin
+            .from('bank_statements')
+            .update({ status: 'failed' })
+            .eq('id', stmt.id);
+          failedCount++;
+          continue;
+        }
+
+        const { data: fileData, error: downloadError } = await supabaseAdmin.storage
+          .from('bank-statements')
+          .download(storagePath);
+
+        if (downloadError) {
+          console.error(`[Batch] Error downloading PDF for statement ${stmt.id}:`, downloadError);
+          await supabaseAdmin
+            .from('bank_statements')
+            .update({ status: 'failed' })
+            .eq('id', stmt.id);
+          failedCount++;
+          continue;
+        }
+
+        // Convert Blob to Buffer
+        const arrayBuffer = await fileData.arrayBuffer();
+        const pdfBuffer = Buffer.from(arrayBuffer);
+
+        // Extract transactions using Claude
+        console.log(`[Batch] Extracting transactions from ${stmt.filename}...`);
+        const transactions = await extractTransactionsFromPDF(pdfBuffer);
+
+        // Save transactions with dedup logic
+        const validTransactions = transactions
+          .filter(txn => txn.merchant_name && txn.amount !== undefined && txn.transaction_date)
+          .map(txn => {
+            const hashInput = `${txn.transaction_date}_${txn.amount}_${txn.merchant_name}`.toLowerCase().trim();
+            const transactionHash = crypto.createHash('md5').update(hashInput).digest('hex');
+            return {
+              user_id,
+              statement_id: stmt.id,
+              merchant_name: txn.merchant_name,
+              amount: parseFloat(txn.amount),
+              transaction_date: txn.transaction_date,
+              description: txn.description || null,
+              transaction_hash: transactionHash
+            };
+          });
+
+        let savedCount = 0;
+        const BATCH_SIZE = 100;
+        for (let j = 0; j < validTransactions.length; j += BATCH_SIZE) {
+          const batch = validTransactions.slice(j, j + BATCH_SIZE);
+          const { data, error: insertError } = await supabaseAdmin
+            .from('uploaded_transactions')
+            .upsert(batch, {
+              onConflict: 'user_id,transaction_hash',
+              ignoreDuplicates: true
+            })
+            .select();
+
+          if (insertError) {
+            console.error('[Batch] Batch insert error:', insertError);
+          } else {
+            savedCount += data?.length || 0;
+            // Collect new transaction IDs for Q1 generation
+            if (data) {
+              allNewTransactionIds.push(...data.map(t => t.id));
+            }
+          }
+        }
+
+        const duplicateCount = validTransactions.length - savedCount;
+        console.log(`[Batch] ${stmt.filename}: Saved ${savedCount} transactions, ${duplicateCount} duplicates skipped`);
+
+        // Update statement status to completed
+        await supabaseAdmin
+          .from('bank_statements')
+          .update({
+            status: 'completed',
+            transaction_count: savedCount
+          })
+          .eq('id', stmt.id);
+
+        processedCount++;
+
+      } catch (stmtError) {
+        console.error(`[Batch] Error processing statement ${stmt.id} (${stmt.filename}):`, stmtError);
+        await supabaseAdmin
+          .from('bank_statements')
+          .update({ status: 'failed' })
+          .eq('id', stmt.id);
+        failedCount++;
+        // Continue with next statement
+      }
+    }
+
+    console.log(`[Batch] Extraction complete: ${processedCount} processed, ${failedCount} failed, ${allNewTransactionIds.length} new transactions`);
+
+    // Bulk generate Q1 questions for ALL new transactions
+    if (allNewTransactionIds.length > 0) {
+      try {
+        // Fetch user profile for Q1 generation
+        const { data: userProfile, error: profileError } = await supabaseAdmin
+          .from('user_profiles')
+          .select('*')
+          .eq('user_id', user_id)
+          .single();
+
+        if (profileError) {
+          console.error('[Batch] Error fetching user profile for Q1 generation:', profileError);
+        } else {
+          // Fetch the actual transaction records
+          const { data: newTransactions, error: txnError } = await supabaseAdmin
+            .from('uploaded_transactions')
+            .select('*')
+            .in('id', allNewTransactionIds);
+
+          if (txnError) {
+            console.error('[Batch] Error fetching new transactions for Q1:', txnError);
+          } else if (newTransactions && newTransactions.length > 0) {
+            console.log(`[Batch] Generating Q1 for ${newTransactions.length} new transactions...`);
+
+            // Format transactions for Q1 generation
+            const formattedTransactions = newTransactions.map(t => ({
+              transaction_id: t.id,
+              name: t.merchant_name,
+              merchant_name: t.merchant_name,
+              amount: parseFloat(t.amount),
+              date: t.transaction_date
+            }));
+
+            // Process in batches to avoid rate limits
+            const Q1_BATCH_SIZE = 8;
+            const Q1_BATCH_DELAY = 12000;
+
+            for (let i = 0; i < formattedTransactions.length; i += Q1_BATCH_SIZE) {
+              const batch = formattedTransactions.slice(i, i + Q1_BATCH_SIZE);
+              const batchPromises = batch.map(t => generateQ1ForTransaction(t, userProfile));
+              await Promise.all(batchPromises);
+
+              const progress = Math.min(i + Q1_BATCH_SIZE, formattedTransactions.length);
+              console.log(`[Batch] Q1 generated for ${progress}/${formattedTransactions.length} transactions`);
+
+              // Add delay between batches (except for the last batch)
+              if (i + Q1_BATCH_SIZE < formattedTransactions.length) {
+                await new Promise(resolve => setTimeout(resolve, Q1_BATCH_DELAY));
+              }
+            }
+
+            console.log(`[Batch] Q1 generation complete`);
+          }
+        }
+      } catch (q1Error) {
+        console.error('[Batch] Error during Q1 generation:', q1Error);
+      }
+    }
+
+    // Send push notification
+    try {
+      const { data: profile, error: profileError } = await supabaseAdmin
+        .from('user_profiles')
+        .select('expo_push_token')
+        .eq('user_id', user_id)
+        .single();
+
+      if (!profileError && profile?.expo_push_token) {
+        const totalNew = allNewTransactionIds.length;
+        await sendPushNotification(
+          profile.expo_push_token,
+          'Statements processed',
+          `${processedCount} statement${processedCount !== 1 ? 's' : ''} processed. ${totalNew} new transaction${totalNew !== 1 ? 's' : ''} ready to categorize.`
+        );
+      }
+    } catch (notifError) {
+      console.error('[Batch] Error sending push notification:', notifError);
+    }
+
+    console.log(`[Batch] Background processing complete for user: ${user_id}`);
+
+  } catch (error) {
+    console.error('[Batch] Fatal error in background processing:', error);
+  }
+}
+
+// Helper to extract storage path from a public URL
+function extractStoragePath(fileUrl) {
+  if (!fileUrl) return null;
+  // Public URLs look like: https://<project>.supabase.co/storage/v1/object/public/bank-statements/<path>
+  const marker = '/bank-statements/';
+  const idx = fileUrl.indexOf(marker);
+  if (idx === -1) return null;
+  return fileUrl.substring(idx + marker.length);
+}
+
+// Trigger batch processing of pending statements
+app.post('/api/process_batch', requireAuth, async (req, res) => {
+  try {
+    const { user_id } = req.body;
+
+    if (!user_id) {
+      return res.status(400).json({ error: 'user_id is required' });
+    }
+
+    // Count pending statements
+    const { data: pendingStatements, error: fetchError } = await supabaseAdmin
+      .from('bank_statements')
+      .select('id')
+      .eq('user_id', user_id)
+      .eq('status', 'pending');
+
+    if (fetchError) throw fetchError;
+
+    const pendingCount = pendingStatements?.length || 0;
+
+    if (pendingCount === 0) {
+      return res.json({ success: true, processing: false, pending_count: 0 });
+    }
+
+    // Fire-and-forget: start background processing
+    processStatementsInBackground(user_id).catch(err => {
+      console.error('[Batch] Unhandled error in background processing:', err);
+    });
+
+    // Return immediately
+    res.json({
+      success: true,
+      processing: true,
+      pending_count: pendingCount
+    });
+
+  } catch (error) {
+    console.error('Error starting batch processing:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Register Expo push token
+app.post('/api/register_push_token', requireAuth, async (req, res) => {
+  try {
+    const { user_id, expo_push_token } = req.body;
+
+    if (!user_id || !expo_push_token) {
+      return res.status(400).json({ error: 'user_id and expo_push_token are required' });
+    }
+
+    const { error } = await supabaseAdmin
+      .from('user_profiles')
+      .update({ expo_push_token })
+      .eq('user_id', user_id);
+
+    if (error) throw error;
+
+    console.log(`Push token registered for user: ${user_id}`);
+    res.json({ success: true });
+
+  } catch (error) {
+    console.error('Error registering push token:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get statements grouped by month
+app.post('/api/get_statements_by_month', requireAuth, async (req, res) => {
+  try {
+    const { user_id } = req.body;
+
+    if (!user_id) {
+      return res.status(400).json({ error: 'user_id is required' });
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('bank_statements')
+      .select('*')
+      .eq('user_id', user_id)
+      .order('statement_month', { ascending: false, nullsFirst: false })
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+
+    res.json(data || []);
+
+  } catch (error) {
+    console.error('Error getting statements by month:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get batch processing status
+app.post('/api/batch_status', requireAuth, async (req, res) => {
+  try {
+    const { user_id } = req.body;
+
+    if (!user_id) {
+      return res.status(400).json({ error: 'user_id is required' });
+    }
+
+    const { data: statements, error } = await supabaseAdmin
+      .from('bank_statements')
+      .select('status')
+      .eq('user_id', user_id);
+
+    if (error) throw error;
+
+    const counts = { pending: 0, processing: 0, completed: 0, failed: 0, total: 0 };
+    for (const stmt of (statements || [])) {
+      counts[stmt.status] = (counts[stmt.status] || 0) + 1;
+      counts.total++;
+    }
+
+    res.json(counts);
+
+  } catch (error) {
+    console.error('Error getting batch status:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Delete a statement and its associated data
+app.post('/api/delete_statement', requireAuth, async (req, res) => {
+  try {
+    const { statement_id, user_id } = req.body;
+
+    if (!statement_id || !user_id) {
+      return res.status(400).json({ error: 'statement_id and user_id are required' });
+    }
+
+    // Fetch the statement to get storage path
+    const { data: statement, error: fetchError } = await supabaseAdmin
+      .from('bank_statements')
+      .select('*')
+      .eq('id', statement_id)
+      .eq('user_id', user_id)
+      .single();
+
+    if (fetchError) {
+      console.error('Error fetching statement for deletion:', fetchError);
+      return res.status(404).json({ error: 'Statement not found' });
+    }
+
+    // Delete associated uploaded_transactions
+    const { error: txnDeleteError } = await supabaseAdmin
+      .from('uploaded_transactions')
+      .delete()
+      .eq('statement_id', statement_id)
+      .eq('user_id', user_id);
+
+    if (txnDeleteError) {
+      console.error('Error deleting associated transactions:', txnDeleteError);
+    }
+
+    // Delete the statement record
+    const { error: stmtDeleteError } = await supabaseAdmin
+      .from('bank_statements')
+      .delete()
+      .eq('id', statement_id)
+      .eq('user_id', user_id);
+
+    if (stmtDeleteError) throw stmtDeleteError;
+
+    // Delete the PDF from Supabase Storage
+    const storagePath = statement.storage_path || extractStoragePath(statement.file_url);
+    if (storagePath) {
+      const { error: storageDeleteError } = await supabaseAdmin.storage
+        .from('bank-statements')
+        .remove([storagePath]);
+
+      if (storageDeleteError) {
+        console.error('Error deleting PDF from storage:', storageDeleteError);
+        // Don't fail the request — the record is already deleted
+      }
+    }
+
+    console.log(`Statement ${statement_id} deleted (including ${statement.transaction_count || 0} transactions)`);
+    res.json({ success: true });
+
+  } catch (error) {
+    console.error('Error deleting statement:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -848,88 +1315,7 @@ Respond with ONLY valid JSON.`);
 app.post('/api/bulk_generate_first_questions', requireAuth, rateLimit(10, 60000), async (req, res) => {
   try {
     const { transactions, userProfile } = req.body;
-    console.log('⚡ Bulk generating Q1 for', transactions.length, 'transactions');
-
-    const workTypeDesc = userProfile?.work_type === 'content_creation' ? 'content creator'
-      : userProfile?.work_type === 'freelancing' ? 'freelancer'
-      : userProfile?.work_type === 'side_hustle' ? 'side hustler'
-      : userProfile?.custom_work_type || 'self-employed';
-
-    const businessStructureDesc = userProfile?.tracking_goal === 'sole_trader' ? 'sole trader'
-      : userProfile?.tracking_goal === 'limited_company' ? 'limited company director'
-      : 'self-employed (not yet registered)';
-
-    // Helper function to generate Q1 for a single transaction
-    const generateQ1 = async (transaction) => {
-      const isIncome = transaction.amount < 0;
-
-      const merchantName = transaction.merchant_name || transaction.name;
-      const amt = Math.abs(transaction.amount);
-
-      const prompt = isIncome
-        ? `You are a friendly UK tax assistant helping a ${workTypeDesc} categorize a bank transaction. Be conversational.
-
-TRANSACTION: £${amt} received from "${merchantName}" on ${transaction.date}
-USER: ${workTypeDesc}
-
-Ask ONE smart opening question about this specific payment. Your question MUST reference the merchant name and/or amount naturally. Do NOT use generic questions like "What is this income for?"
-- Provide 4-5 specific options including at least one personal option (friend paying back, gift, etc.)
-- If amount looks like salary (round £1,500-£6,000, or from a company), include PAYE salary option
-
-Respond with ONLY valid JSON:
-{
-  "questions": [{
-    "text": "contextual question referencing ${merchantName} and/or £${amt}",
-    "options": ["specific option 1", "specific option 2", "personal option", "another option"]
-  }]
-}`
-        : `You are a friendly UK tax assistant helping a ${workTypeDesc} categorize a bank transaction. Be conversational.
-
-TRANSACTION: £${amt} spent at "${merchantName}" on ${transaction.date}
-USER: ${workTypeDesc}
-
-Ask ONE smart opening question about this specific purchase. Your question MUST reference the merchant name and/or amount naturally. Do NOT use generic questions like "What did you buy?"
-- Provide 4 specific options based on what ${merchantName} actually sells
-- Include both single-item and multiple-items options where relevant
-
-Respond with ONLY valid JSON:
-{
-  "questions": [{
-    "text": "contextual question referencing ${merchantName} and/or £${amt}",
-    "options": ["specific option 1", "specific option 2", "multiple items option", "specific option 4"]
-  }]
-}`;
-
-      try {
-        const message = await anthropic.messages.create({
-          model: "claude-sonnet-4-6",
-          max_tokens: 400,
-          messages: [{ role: "user", content: prompt }]
-        });
-
-        let responseText = message.content[0].text;
-        responseText = responseText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-
-        const firstBrace = responseText.indexOf('{');
-        const lastBrace = responseText.lastIndexOf('}');
-        if (firstBrace !== -1 && lastBrace !== -1 && firstBrace < lastBrace) {
-          responseText = responseText.substring(firstBrace, lastBrace + 1);
-        }
-
-        const result = JSON.parse(responseText);
-        return {
-          transaction_id: transaction.transaction_id,
-          questions: result.questions
-        };
-      } catch (error) {
-        console.error(`Error generating Q1 for ${transaction.merchant_name || transaction.name}:`, error.message);
-        return {
-          transaction_id: transaction.transaction_id,
-          questions: null,
-          error: error.message
-        };
-      }
-    };
+    console.log('Bulk generating Q1 for', transactions.length, 'transactions');
 
     // Process in batches to avoid rate limits (50 req/min on API)
     const BATCH_SIZE = 8;
@@ -938,12 +1324,12 @@ Respond with ONLY valid JSON:
 
     for (let i = 0; i < transactions.length; i += BATCH_SIZE) {
       const batch = transactions.slice(i, i + BATCH_SIZE);
-      const batchPromises = batch.map(t => generateQ1(t));
+      const batchPromises = batch.map(t => generateQ1ForTransaction(t, userProfile));
       const batchResults = await Promise.all(batchPromises);
       results.push(...batchResults);
 
       const successCount = results.filter(r => r.questions).length;
-      console.log(`✅ Generated Q1 for ${successCount}/${transactions.length} transactions`);
+      console.log(`Generated Q1 for ${successCount}/${transactions.length} transactions`);
 
       // Add delay between batches (except for the last batch)
       if (i + BATCH_SIZE < transactions.length) {
@@ -953,7 +1339,7 @@ Respond with ONLY valid JSON:
 
     res.json({ results });
   } catch (error) {
-    console.error('❌ Error in bulk question generation:', error);
+    console.error('Error in bulk question generation:', error);
     res.status(500).json({ error: error.message });
   }
 });
