@@ -6,6 +6,7 @@ const crypto = require('crypto');
 const multer = require('multer');
 const pdfParse = require('pdf-parse');
 const { google } = require('googleapis');
+const hmrcRules = require('./hmrc-rules');
 require('dotenv').config();
 
 // Initialize Google OAuth2 client
@@ -556,61 +557,165 @@ async function processStatementsInBackground(user_id) {
 
     console.log(`[Batch] Extraction complete: ${processedCount} processed, ${failedCount} failed, ${allNewTransactionIds.length} new transactions`);
 
-    // Bulk generate Q1 questions for ALL new transactions
+    // Smart categorize all new transactions in bulk (replaces individual Q1 generation)
     if (allNewTransactionIds.length > 0) {
       try {
-        // Fetch user profile for Q1 generation
-        const { data: userProfile, error: profileError } = await supabaseAdmin
+        console.log(`[Batch] Running smart categorization for ${allNewTransactionIds.length} transactions...`);
+
+        // Fetch user profile
+        const { data: userProfile } = await supabaseAdmin
           .from('user_profiles')
           .select('*')
           .eq('user_id', user_id)
           .single();
 
-        if (profileError) {
-          console.error('[Batch] Error fetching user profile for Q1 generation:', profileError);
-        } else {
-          // Fetch the actual transaction records
-          const { data: newTransactions, error: txnError } = await supabaseAdmin
-            .from('uploaded_transactions')
-            .select('*')
-            .in('id', allNewTransactionIds);
+        // Fetch categorization history
+        const { data: history } = await supabaseAdmin
+          .from('categorization_history')
+          .select('*')
+          .eq('user_id', user_id)
+          .order('created_at', { ascending: false })
+          .limit(200);
 
-          if (txnError) {
-            console.error('[Batch] Error fetching new transactions for Q1:', txnError);
-          } else if (newTransactions && newTransactions.length > 0) {
-            console.log(`[Batch] Generating Q1 for ${newTransactions.length} new transactions...`);
+        const totalConfirmed = (history || []).length;
 
-            // Format transactions for Q1 generation
-            const formattedTransactions = newTransactions.map(t => ({
-              transaction_id: t.id,
-              name: t.merchant_name,
-              merchant_name: t.merchant_name,
-              amount: parseFloat(t.amount),
-              date: t.transaction_date
-            }));
+        // Fetch the new transactions
+        const { data: newTransactions } = await supabaseAdmin
+          .from('uploaded_transactions')
+          .select('*')
+          .in('id', allNewTransactionIds);
 
-            // Process sequentially to avoid overloading API
-            let q1SuccessCount = 0;
+        if (newTransactions && newTransactions.length > 0) {
+          const workTypeDesc = userProfile?.work_type === 'content_creation' ? 'content creator'
+            : userProfile?.work_type === 'freelancing' ? 'freelancer'
+            : userProfile?.work_type === 'side_hustle' ? 'side hustler'
+            : userProfile?.custom_work_type || 'self-employed';
 
-            for (let i = 0; i < formattedTransactions.length; i++) {
-              const result = await generateQ1ForTransaction(formattedTransactions[i], userProfile);
-              if (result.questions) q1SuccessCount++;
+          const businessStructure = userProfile?.tracking_goal === 'sole_trader' ? 'sole trader'
+            : userProfile?.tracking_goal === 'limited_company' ? 'limited company director'
+            : 'self-employed (not yet registered)';
 
-              if ((i + 1) % 10 === 0 || i === formattedTransactions.length - 1) {
-                console.log(`[Batch] Q1 generated for ${q1SuccessCount}/${i + 1} transactions (${formattedTransactions.length} total)`);
+          // Build history summary
+          const historyByMerchant = {};
+          for (const h of (history || [])) {
+            const key = h.merchant_name_normalized;
+            if (!historyByMerchant[key]) {
+              historyByMerchant[key] = { entries: [], merchant: h.merchant_name };
+            }
+            historyByMerchant[key].entries.push(h);
+          }
+          let historySummary = '';
+          for (const [normalized, data] of Object.entries(historyByMerchant)) {
+            const catCounts = {};
+            for (const e of data.entries) {
+              const label = e.category_name + (e.business_percent > 0 ? ` (${e.business_percent}% business)` : ' (personal)');
+              catCounts[label] = (catCounts[label] || 0) + 1;
+            }
+            const countStr = Object.entries(catCounts).map(([cat, n]) => `${cat}: ${n}x`).join(', ');
+            historySummary += `- ${data.merchant} (${data.entries.length} times): ${countStr}\n`;
+          }
+
+          // Process in chunks of 50
+          const CHUNK_SIZE = 50;
+          let autoCount = 0;
+          let reviewCount = 0;
+
+          for (let i = 0; i < newTransactions.length; i += CHUNK_SIZE) {
+            const chunk = newTransactions.slice(i, i + CHUNK_SIZE);
+            const chunkTxnList = chunk.map(t => {
+              const isIncome = parseFloat(t.amount) < 0;
+              return `${t.id} | ${t.merchant_name} | £${Math.abs(parseFloat(t.amount)).toFixed(2)} | ${t.transaction_date} | ${isIncome ? 'INCOME' : 'EXPENSE'}`;
+            }).join('\n');
+
+            const prompt = `You are a UK tax categorization expert. Categorize these bank transactions for a ${workTypeDesc}.
+
+USER PROFILE:
+- Role: ${userProfile?.job_role || workTypeDesc}
+- Business structure: ${businessStructure}
+- Main clients: ${(userProfile?.main_clients || []).join(', ') || 'not specified'}
+- Works from: ${userProfile?.work_location || 'not specified'}
+- Monthly income: £${userProfile?.monthly_income || 'unknown'}
+
+${historySummary ? `CATEGORIZATION HISTORY:\n${historySummary}` : 'NO HISTORY YET - new user.'}
+
+TRANSACTIONS (id | merchant | amount | date | type):
+${chunkTxnList}
+
+EXPENSE CATEGORIES: supplies, software, marketing, subsistence, travel, mileage, home_office, professional_services, training, insurance, personal
+INCOME CATEGORIES: sponsorship_income, ad_revenue, affiliate_income, client_fees, sales_income, employment_income, other_income, personal
+
+RULES:
+1. HMRC "wholly and exclusively" - expenses must be purely for business
+2. Food/meals = personal unless overnight business travel
+3. Merchant categorized same way 3+ times in history = follow pattern
+4. New merchant with no history = use judgment but lower confidence
+5. Mixed history = needs_review
+6. ATM/cash/own-account transfers = personal
+7. Streaming subscriptions = personal unless content creator
+8. Groceries = personal
+
+Return ONLY valid JSON array:
+[{"transaction_id":"...","status":"auto_business"|"auto_personal"|"needs_review","category_id":"...","category_name":"...","business_percent":0,"tax_deductible":false,"confidence":0.9,"explanation":"...","review_reason":null}]`;
+
+            console.log(`[Batch] Smart categorizing chunk ${Math.floor(i/CHUNK_SIZE) + 1}/${Math.ceil(newTransactions.length/CHUNK_SIZE)}`);
+
+            try {
+              const stream = await anthropic.messages.stream({
+                model: "claude-sonnet-4-6",
+                max_tokens: 16000,
+                messages: [{ role: "user", content: prompt }]
+              });
+              const message = await stream.finalMessage();
+
+              let responseText = message.content[0].text;
+              responseText = responseText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+              const firstBracket = responseText.indexOf('[');
+              const lastBracket = responseText.lastIndexOf(']');
+              if (firstBracket !== -1 && lastBracket !== -1) {
+                responseText = responseText.substring(firstBracket, lastBracket + 1);
               }
 
-              // Small delay between each request
-              if (i < formattedTransactions.length - 1) {
-                await new Promise(resolve => setTimeout(resolve, 1500));
+              const results = JSON.parse(responseText);
+
+              for (const result of results) {
+                await supabaseAdmin
+                  .from('uploaded_transactions')
+                  .update({
+                    auto_status: result.status,
+                    auto_category_id: result.category_id,
+                    auto_category_name: result.category_name,
+                    auto_business_percent: result.business_percent,
+                    auto_confidence: result.confidence,
+                    auto_explanation: result.explanation,
+                    auto_review_reason: result.review_reason
+                  })
+                  .eq('id', result.transaction_id)
+                  .eq('user_id', user_id);
+
+                if (result.status === 'needs_review') reviewCount++;
+                else autoCount++;
+              }
+            } catch (chunkError) {
+              console.error(`[Batch] Error in smart categorization chunk:`, chunkError.message);
+              // Mark chunk as needs_review
+              for (const t of chunk) {
+                await supabaseAdmin
+                  .from('uploaded_transactions')
+                  .update({ auto_status: 'needs_review', auto_review_reason: 'Processing error' })
+                  .eq('id', t.id);
+                reviewCount++;
               }
             }
 
-            console.log(`[Batch] Q1 generation complete: ${q1SuccessCount}/${formattedTransactions.length} succeeded`);
+            if (i + CHUNK_SIZE < newTransactions.length) {
+              await new Promise(resolve => setTimeout(resolve, 2000));
+            }
           }
+
+          console.log(`[Batch] Smart categorization complete: ${autoCount} auto, ${reviewCount} review`);
         }
-      } catch (q1Error) {
-        console.error('[Batch] Error during Q1 generation:', q1Error);
+      } catch (smartCatError) {
+        console.error('[Batch] Error during smart categorization:', smartCatError);
       }
     }
 
@@ -626,8 +731,8 @@ async function processStatementsInBackground(user_id) {
         const totalNew = allNewTransactionIds.length;
         await sendPushNotification(
           profile.expo_push_token,
-          'Statements processed',
-          `${processedCount} statement${processedCount !== 1 ? 's' : ''} processed. ${totalNew} new transaction${totalNew !== 1 ? 's' : ''} ready to categorize.`
+          'Transactions ready for review',
+          `${totalNew} transaction${totalNew !== 1 ? 's' : ''} categorized and ready for your review.`
         );
       }
     } catch (notifError) {
@@ -2100,6 +2205,518 @@ Respond with ONLY valid JSON:
   } catch (error) {
     console.error('❌ Error in bulk categorization:', error);
     res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ============================================================
+// SMART CATEGORIZATION SYSTEM
+// ============================================================
+
+/**
+ * Smart bulk categorize - sends all uncategorized transactions to Claude
+ * in one call with user profile + categorization history for context
+ */
+app.post('/api/smart_categorize', requireAuth, async (req, res) => {
+  try {
+    const user_id = req.user_id;
+    console.log(`[SmartCat] Starting smart categorization for user: ${user_id}`);
+
+    // 1. Fetch uncategorized transactions
+    const { data: uploaded, error: uploadedError } = await supabaseAdmin
+      .from('uploaded_transactions')
+      .select('*')
+      .eq('user_id', user_id)
+      .in('auto_status', ['pending'])
+      .order('transaction_date', { ascending: false });
+
+    if (uploadedError) throw uploadedError;
+
+    // Filter out already-categorized ones
+    const { data: categorized } = await supabaseAdmin
+      .from('categorized_transactions')
+      .select('source_transaction_id')
+      .eq('user_id', user_id);
+
+    const categorizedIds = new Set((categorized || []).map(c => c.source_transaction_id));
+    const uncategorized = (uploaded || []).filter(t => !categorizedIds.has(t.id));
+
+    if (uncategorized.length === 0) {
+      return res.json({ message: 'No transactions to categorize', results: [] });
+    }
+
+    console.log(`[SmartCat] ${uncategorized.length} uncategorized transactions`);
+
+    // 2. Fetch user profile
+    const { data: userProfile } = await supabaseAdmin
+      .from('user_profiles')
+      .select('*')
+      .eq('user_id', user_id)
+      .single();
+
+    // 3. Fetch categorization history (last 200)
+    const { data: history } = await supabaseAdmin
+      .from('categorization_history')
+      .select('*')
+      .eq('user_id', user_id)
+      .order('created_at', { ascending: false })
+      .limit(200);
+
+    // 4. Fetch merchant patterns
+    const { data: patterns } = await supabaseAdmin
+      .from('merchant_patterns')
+      .select('*')
+      .eq('user_id', user_id);
+
+    // 5. Build context
+    const totalConfirmed = (history || []).length;
+    const learningPhase = totalConfirmed < 50 ? 1 : totalConfirmed < 200 ? 2 : 3;
+
+    const workTypeDesc = userProfile?.work_type === 'content_creation' ? 'content creator'
+      : userProfile?.work_type === 'freelancing' ? 'freelancer'
+      : userProfile?.work_type === 'side_hustle' ? 'side hustler'
+      : userProfile?.custom_work_type || 'self-employed';
+
+    const businessStructure = userProfile?.tracking_goal === 'sole_trader' ? 'sole trader'
+      : userProfile?.tracking_goal === 'limited_company' ? 'limited company director'
+      : 'self-employed (not yet registered)';
+
+    // Summarize history by merchant
+    const historyByMerchant = {};
+    for (const h of (history || [])) {
+      const key = h.merchant_name_normalized;
+      if (!historyByMerchant[key]) {
+        historyByMerchant[key] = { entries: [], merchant: h.merchant_name };
+      }
+      historyByMerchant[key].entries.push(h);
+    }
+
+    let historySummary = '';
+    for (const [normalized, data] of Object.entries(historyByMerchant)) {
+      const catCounts = {};
+      for (const e of data.entries) {
+        const label = e.category_name + (e.business_percent > 0 ? ` (${e.business_percent}% business)` : ' (personal)');
+        catCounts[label] = (catCounts[label] || 0) + 1;
+      }
+      const countStr = Object.entries(catCounts).map(([cat, n]) => `${cat}: ${n}x`).join(', ');
+      historySummary += `- ${data.merchant} (${data.entries.length} times): ${countStr}\n`;
+    }
+
+    // 6. Build transaction list for prompt
+    const txnList = uncategorized.map(t => {
+      const isIncome = parseFloat(t.amount) < 0;
+      return `${t.id} | ${t.merchant_name} | £${Math.abs(parseFloat(t.amount)).toFixed(2)} | ${t.transaction_date} | ${isIncome ? 'INCOME' : 'EXPENSE'}`;
+    }).join('\n');
+
+    // 7. Process in chunks of 50 to stay within token limits
+    const CHUNK_SIZE = 50;
+    const allResults = [];
+
+    for (let i = 0; i < uncategorized.length; i += CHUNK_SIZE) {
+      const chunk = uncategorized.slice(i, i + CHUNK_SIZE);
+      const chunkTxnList = chunk.map(t => {
+        const isIncome = parseFloat(t.amount) < 0;
+        return `${t.id} | ${t.merchant_name} | £${Math.abs(parseFloat(t.amount)).toFixed(2)} | ${t.transaction_date} | ${isIncome ? 'INCOME' : 'EXPENSE'}`;
+      }).join('\n');
+
+      const prompt = `You are a UK tax categorization expert. Categorize these bank transactions for a ${workTypeDesc}.
+
+USER PROFILE:
+- Role: ${userProfile?.job_role || workTypeDesc}
+- Business structure: ${businessStructure}
+- Main clients: ${(userProfile?.main_clients || []).join(', ') || 'not specified'}
+- Works from: ${userProfile?.work_location || 'not specified'}
+- Monthly income: £${userProfile?.monthly_income || 'unknown'}
+
+${historySummary ? `CATEGORIZATION HISTORY (what this user has previously confirmed):\n${historySummary}` : 'NO CATEGORIZATION HISTORY YET - this is a new user.'}
+
+TRANSACTIONS TO CATEGORIZE (format: id | merchant | amount | date | type):
+${chunkTxnList}
+
+EXPENSE CATEGORIES:
+- supplies: Office supplies, materials, equipment, props
+- software: Business software, tools, subscriptions, apps
+- marketing: Advertising, promotions, social media ads
+- subsistence: Overnight business travel meals ONLY (day-to-day meals NOT deductible)
+- travel: Business travel costs (trains, flights, parking - NOT commuting)
+- mileage: Business mileage (45p/mile first 10k, 25p after)
+- home_office: Rent, utilities, internet for home workspace
+- professional_services: Accountant, lawyer, consultant fees
+- training: Courses, books, professional development
+- insurance: Business insurance premiums
+- personal: Non-business expense (not deductible)
+
+INCOME CATEGORIES:
+- sponsorship_income: Sponsorships, brand deals
+- ad_revenue: Platform ad revenue
+- affiliate_income: Affiliate commissions
+- client_fees: Client work, consulting, freelance projects
+- sales_income: Product/merchandise sales
+- employment_income: PAYE salary (already taxed)
+- other_income: Other business income
+- personal: Personal transfer, gift, friend paying back (not taxable)
+
+RULES:
+1. HMRC "wholly and exclusively" rule - expenses must be purely for business
+2. Food/meals/restaurants: default to personal UNLESS user history shows business pattern
+3. If merchant has been categorized the same way 3+ times in history, follow that pattern
+4. If merchant is new (no history), use your best judgment but mark confidence lower
+5. If merchant has mixed history (sometimes business, sometimes personal), mark as needs_review
+6. ATM withdrawals, cash, transfers between own accounts = personal unless clear business pattern
+7. Subscriptions (Netflix, Spotify, Disney+) = personal unless user is a content creator reviewing content
+8. Groceries/supermarkets = personal unless strong business evidence
+
+For each transaction return:
+- status: "auto_business", "auto_personal", or "needs_review"
+- category_id: from the lists above
+- category_name: human-readable name
+- business_percent: 0-100
+- tax_deductible: true/false
+- confidence: 0.0-1.0
+- explanation: brief reason (10 words max)
+- review_reason: null, or why it needs review
+
+Return ONLY a valid JSON array. No markdown, no explanation outside the JSON.
+[{"transaction_id":"...","status":"...","category_id":"...","category_name":"...","business_percent":0,"tax_deductible":false,"confidence":0.9,"explanation":"...","review_reason":null}]`;
+
+      console.log(`[SmartCat] Processing chunk ${Math.floor(i/CHUNK_SIZE) + 1}/${Math.ceil(uncategorized.length/CHUNK_SIZE)} (${chunk.length} transactions)`);
+
+      const MAX_RETRIES = 3;
+      let chunkResults = null;
+
+      for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+        try {
+          const stream = await anthropic.messages.stream({
+            model: "claude-sonnet-4-6",
+            max_tokens: 16000,
+            messages: [{ role: "user", content: prompt }]
+          });
+          const message = await stream.finalMessage();
+
+          let responseText = message.content[0].text;
+          responseText = responseText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+
+          const firstBracket = responseText.indexOf('[');
+          const lastBracket = responseText.lastIndexOf(']');
+          if (firstBracket !== -1 && lastBracket !== -1) {
+            responseText = responseText.substring(firstBracket, lastBracket + 1);
+          }
+
+          chunkResults = JSON.parse(responseText);
+          break;
+        } catch (error) {
+          const status = error.status || error.statusCode;
+          if ((status === 529 || status === 429) && attempt < MAX_RETRIES) {
+            const delay = [5000, 15000, 30000][attempt];
+            console.log(`[SmartCat] API error ${status}, retrying in ${delay/1000}s`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+            continue;
+          }
+          console.error(`[SmartCat] Error processing chunk:`, error.message);
+          // Mark all in chunk as needs_review on failure
+          chunkResults = chunk.map(t => ({
+            transaction_id: t.id,
+            status: 'needs_review',
+            category_id: null,
+            category_name: null,
+            business_percent: 0,
+            tax_deductible: false,
+            confidence: 0,
+            explanation: 'AI unavailable',
+            review_reason: 'Processing error'
+          }));
+          break;
+        }
+      }
+
+      if (chunkResults) {
+        allResults.push(...chunkResults);
+      }
+
+      // Delay between chunks
+      if (i + CHUNK_SIZE < uncategorized.length) {
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      }
+    }
+
+    // 8. Save results to uploaded_transactions
+    let autoCount = 0;
+    let reviewCount = 0;
+
+    for (const result of allResults) {
+      const { error: updateError } = await supabaseAdmin
+        .from('uploaded_transactions')
+        .update({
+          auto_status: result.status,
+          auto_category_id: result.category_id,
+          auto_category_name: result.category_name,
+          auto_business_percent: result.business_percent,
+          auto_confidence: result.confidence,
+          auto_explanation: result.explanation,
+          auto_review_reason: result.review_reason
+        })
+        .eq('id', result.transaction_id)
+        .eq('user_id', user_id);
+
+      if (updateError) {
+        console.error(`[SmartCat] Error updating transaction ${result.transaction_id}:`, updateError);
+      } else {
+        if (result.status === 'needs_review') reviewCount++;
+        else autoCount++;
+      }
+    }
+
+    console.log(`[SmartCat] Complete: ${autoCount} auto-categorized, ${reviewCount} need review`);
+
+    res.json({
+      success: true,
+      learning_phase: learningPhase,
+      total_confirmed: totalConfirmed,
+      auto_categorized: autoCount,
+      needs_review: reviewCount,
+      total: allResults.length,
+      results: allResults
+    });
+  } catch (error) {
+    console.error('[SmartCat] Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * Get transactions grouped for the review screen
+ */
+app.post('/api/get_review_transactions', requireAuth, async (req, res) => {
+  try {
+    const user_id = req.user_id;
+
+    // Get all uploaded transactions with auto_status set
+    const { data: transactions, error } = await supabaseAdmin
+      .from('uploaded_transactions')
+      .select('*')
+      .eq('user_id', user_id)
+      .order('transaction_date', { ascending: false });
+
+    if (error) throw error;
+
+    // Filter out already categorized
+    const { data: categorized } = await supabaseAdmin
+      .from('categorized_transactions')
+      .select('source_transaction_id')
+      .eq('user_id', user_id);
+
+    const categorizedIds = new Set((categorized || []).map(c => c.source_transaction_id));
+    const uncategorized = (transactions || []).filter(t => !categorizedIds.has(t.id));
+
+    // Get learning phase
+    const { count: historyCount } = await supabaseAdmin
+      .from('categorization_history')
+      .select('*', { count: 'exact', head: true })
+      .eq('user_id', user_id);
+
+    const totalConfirmed = historyCount || 0;
+    const learningPhase = totalConfirmed < 50 ? 1 : totalConfirmed < 200 ? 2 : 3;
+
+    // Split by status
+    const autoBusiness = uncategorized.filter(t => t.auto_status === 'auto_business');
+    const autoPersonal = uncategorized.filter(t => t.auto_status === 'auto_personal');
+    const needsReview = uncategorized.filter(t => t.auto_status === 'needs_review');
+    const pending = uncategorized.filter(t => t.auto_status === 'pending' || !t.auto_status);
+
+    // Group needs_review by normalized merchant
+    const merchantGroups = {};
+    for (const t of needsReview) {
+      const normalized = normalizeMerchantName(t.merchant_name);
+      if (!merchantGroups[normalized]) {
+        merchantGroups[normalized] = {
+          merchant: t.merchant_name,
+          normalized,
+          transactions: [],
+          total_amount: 0
+        };
+      }
+      merchantGroups[normalized].transactions.push(t);
+      merchantGroups[normalized].total_amount += Math.abs(parseFloat(t.amount));
+    }
+
+    const groupedReview = Object.values(merchantGroups).map(g => ({
+      ...g,
+      count: g.transactions.length,
+      total_amount: g.total_amount.toFixed(2)
+    })).sort((a, b) => b.count - a.count);
+
+    res.json({
+      learning_phase: learningPhase,
+      total_confirmed: totalConfirmed,
+      auto_business: autoBusiness,
+      auto_personal: autoPersonal,
+      needs_review: groupedReview,
+      pending_count: pending.length,
+      summary: {
+        auto_business_count: autoBusiness.length,
+        auto_personal_count: autoPersonal.length,
+        needs_review_count: needsReview.length,
+        pending_count: pending.length
+      }
+    });
+  } catch (error) {
+    console.error('Error getting review transactions:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * Confirm or correct auto-categorized transactions
+ */
+app.post('/api/confirm_categorization', requireAuth, async (req, res) => {
+  try {
+    const user_id = req.user_id;
+    const { transaction_ids, action, correction } = req.body;
+    // action: 'confirm' or 'correct'
+    // correction: { category_id, category_name, business_percent, tax_deductible } (only for 'correct')
+
+    if (!transaction_ids || !Array.isArray(transaction_ids) || !action) {
+      return res.status(400).json({ error: 'Missing transaction_ids or action' });
+    }
+
+    // Fetch the transactions
+    const { data: transactions, error: fetchError } = await supabaseAdmin
+      .from('uploaded_transactions')
+      .select('*')
+      .in('id', transaction_ids)
+      .eq('user_id', user_id);
+
+    if (fetchError) throw fetchError;
+
+    let confirmedCount = 0;
+
+    for (const txn of transactions) {
+      const isConfirm = action === 'confirm';
+      const categoryId = isConfirm ? txn.auto_category_id : correction.category_id;
+      const categoryName = isConfirm ? txn.auto_category_name : correction.category_name;
+      const businessPercent = isConfirm ? txn.auto_business_percent : correction.business_percent;
+      const taxDeductible = isConfirm
+        ? (txn.auto_category_id !== 'personal' && txn.auto_business_percent > 0)
+        : correction.tax_deductible;
+
+      // Save to categorized_transactions
+      const { error: catError } = await supabaseAdmin
+        .from('categorized_transactions')
+        .upsert({
+          user_id,
+          source_transaction_id: txn.id,
+          source_type: 'pdf_upload',
+          merchant_name: txn.merchant_name,
+          amount: Math.abs(parseFloat(txn.amount)),
+          transaction_date: txn.transaction_date,
+          category_id: categoryId,
+          category_name: categoryName,
+          business_percent: businessPercent,
+          explanation: isConfirm ? txn.auto_explanation : (correction.explanation || 'User corrected'),
+          tax_deductible: taxDeductible,
+          user_answers: {}
+        }, {
+          onConflict: 'user_id,source_transaction_id'
+        });
+
+      if (catError) {
+        console.error(`Error saving categorization for ${txn.id}:`, catError);
+        continue;
+      }
+
+      // Save to categorization_history (learning memory)
+      await supabaseAdmin
+        .from('categorization_history')
+        .insert({
+          user_id,
+          merchant_name: txn.merchant_name,
+          merchant_name_normalized: normalizeMerchantName(txn.merchant_name),
+          category_id: categoryId,
+          category_name: categoryName,
+          business_percent: businessPercent,
+          tax_deductible: taxDeductible,
+          amount: Math.abs(parseFloat(txn.amount)),
+          transaction_date: txn.transaction_date,
+          categorization_source: isConfirm ? 'auto_confirmed' : 'auto_corrected',
+          was_corrected: !isConfirm,
+          original_category_id: !isConfirm ? txn.auto_category_id : null
+        });
+
+      // Update merchant pattern
+      const merchantName = txn.merchant_name;
+      const normalizedMerchant = normalizeMerchantName(merchantName);
+
+      if (normalizedMerchant) {
+        const { data: existingPattern } = await supabaseAdmin
+          .from('merchant_patterns')
+          .select('*')
+          .eq('user_id', user_id)
+          .eq('merchant_name_normalized', normalizedMerchant)
+          .single();
+
+        const amount = Math.abs(parseFloat(txn.amount));
+        const now = new Date().toISOString();
+        const newEntry = {
+          categoryId, categoryName, businessPercent,
+          amount, date: now,
+          source: isConfirm ? 'auto_confirmed' : 'auto_corrected'
+        };
+
+        if (existingPattern) {
+          const categoryHistory = [...(existingPattern.category_history || []), newEntry].slice(-20);
+          const categoryCounts = {};
+          for (const entry of categoryHistory) {
+            const key = `${entry.categoryId}|${entry.businessPercent}`;
+            categoryCounts[key] = (categoryCounts[key] || 0) + 1;
+          }
+          const mostCommon = Object.entries(categoryCounts).sort((a, b) => b[1] - a[1])[0];
+          const [mostCommonKey] = mostCommon;
+          const [mcCatId, mcBizPct] = mostCommonKey.split('|');
+          const mcEntry = categoryHistory.find(e => e.categoryId === mcCatId && e.businessPercent === parseInt(mcBizPct));
+
+          await supabaseAdmin.from('merchant_patterns').update({
+            most_common_category_id: mcCatId,
+            most_common_category_name: mcEntry?.categoryName,
+            most_common_business_percent: parseInt(mcBizPct),
+            occurrence_count: existingPattern.occurrence_count + 1,
+            last_categorization_date: now,
+            category_history: categoryHistory,
+            updated_at: now
+          }).eq('id', existingPattern.id);
+        } else {
+          await supabaseAdmin.from('merchant_patterns').insert({
+            user_id,
+            merchant_name_normalized: normalizedMerchant,
+            most_common_category_id: categoryId,
+            most_common_category_name: categoryName,
+            most_common_business_percent: businessPercent,
+            occurrence_count: 1,
+            last_categorization_date: now,
+            category_history: [newEntry],
+            created_at: now,
+            updated_at: now
+          });
+        }
+      }
+
+      // Mark as processed
+      await supabaseAdmin
+        .from('uploaded_transactions')
+        .update({ auto_status: isConfirm ? 'confirmed' : 'corrected' })
+        .eq('id', txn.id);
+
+      confirmedCount++;
+    }
+
+    console.log(`[SmartCat] ${action === 'confirm' ? 'Confirmed' : 'Corrected'} ${confirmedCount}/${transaction_ids.length} transactions`);
+
+    res.json({
+      success: true,
+      confirmed: confirmedCount,
+      total: transaction_ids.length
+    });
+  } catch (error) {
+    console.error('Error confirming categorization:', error);
+    res.status(500).json({ error: error.message });
   }
 });
 
