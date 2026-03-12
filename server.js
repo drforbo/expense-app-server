@@ -117,9 +117,9 @@ async function extractTransactionsFromPDF(pdfBuffer) {
     const base64PDF = pdfBuffer.toString('base64');
     console.log(`📄 Sending PDF directly to Claude (${(pdfBuffer.length / 1024).toFixed(0)}KB)`);
 
-    const message = await anthropic.messages.create({
+    const stream = await anthropic.messages.stream({
       model: "claude-sonnet-4-6",
-      max_tokens: 64000,
+      max_tokens: 32000,
       messages: [{
         role: "user",
         content: [
@@ -143,17 +143,20 @@ IMPORTANT RULES:
 5. Skip ONLY: balance entries, opening balances, closing balances, statement headers
 6. Include ALL: purchases, payments, transfers, direct debits, standing orders, card payments, ATM withdrawals
 7. Common UK bank formats: "DD MMM" or "DD/MM/YYYY" dates, amounts with £ symbol
+8. Use SHORT descriptions - just the merchant name, not the full transaction text
+9. Use COMPACT JSON - no extra whitespace between entries
 
 Respond with ONLY a valid JSON array. No explanation, no markdown, just raw JSON starting with [ and ending with ].
 
 Format:
-[{"merchant_name": "Tesco", "amount": 45.23, "transaction_date": "2024-01-15", "description": "Original transaction text"}]
+[{"merchant_name":"Tesco","amount":45.23,"transaction_date":"2024-01-15","description":"Tesco groceries"}]
 
 If no transactions found, respond with exactly: []`
           }
         ]
       }]
     });
+    const message = await stream.finalMessage();
 
     let responseText = message.content[0].text;
     console.log(`📝 Claude stop_reason: ${message.stop_reason}, response length: ${responseText.length}`);
