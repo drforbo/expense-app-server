@@ -370,34 +370,47 @@ Respond with ONLY valid JSON:
   }]
 }`;
 
-  try {
-    const message = await anthropic.messages.create({
-      model: "claude-sonnet-4-6",
-      max_tokens: 400,
-      messages: [{ role: "user", content: prompt }]
-    });
+  const MAX_RETRIES = 3;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const message = await anthropic.messages.create({
+        model: "claude-sonnet-4-6",
+        max_tokens: 400,
+        messages: [{ role: "user", content: prompt }]
+      });
 
-    let responseText = message.content[0].text;
-    responseText = responseText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+      let responseText = message.content[0].text;
+      responseText = responseText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
 
-    const firstBrace = responseText.indexOf('{');
-    const lastBrace = responseText.lastIndexOf('}');
-    if (firstBrace !== -1 && lastBrace !== -1 && firstBrace < lastBrace) {
-      responseText = responseText.substring(firstBrace, lastBrace + 1);
+      const firstBrace = responseText.indexOf('{');
+      const lastBrace = responseText.lastIndexOf('}');
+      if (firstBrace !== -1 && lastBrace !== -1 && firstBrace < lastBrace) {
+        responseText = responseText.substring(firstBrace, lastBrace + 1);
+      }
+
+      const result = JSON.parse(responseText);
+      return {
+        transaction_id: transaction.transaction_id,
+        questions: result.questions
+      };
+    } catch (error) {
+      const status = error.status || error.statusCode;
+      const isRetryable = status === 529 || status === 429 || status === 500 || status === 503;
+
+      if (isRetryable && attempt < MAX_RETRIES) {
+        const delay = Math.pow(2, attempt + 1) * 1000; // 2s, 4s, 8s
+        console.log(`[Retry] Q1 for ${merchantName} failed (${status}), retrying in ${delay/1000}s (attempt ${attempt + 1}/${MAX_RETRIES})`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        continue;
+      }
+
+      console.error(`Error generating Q1 for ${merchantName}:`, error.message);
+      return {
+        transaction_id: transaction.transaction_id,
+        questions: null,
+        error: error.message
+      };
     }
-
-    const result = JSON.parse(responseText);
-    return {
-      transaction_id: transaction.transaction_id,
-      questions: result.questions
-    };
-  } catch (error) {
-    console.error(`Error generating Q1 for ${merchantName}:`, error.message);
-    return {
-      transaction_id: transaction.transaction_id,
-      questions: null,
-      error: error.message
-    };
   }
 }
 
