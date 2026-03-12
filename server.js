@@ -119,7 +119,7 @@ async function extractTransactionsFromPDF(pdfBuffer) {
 
     const message = await anthropic.messages.create({
       model: "claude-sonnet-4-6",
-      max_tokens: 16000,
+      max_tokens: 64000,
       messages: [{
         role: "user",
         content: [
@@ -156,8 +156,18 @@ If no transactions found, respond with exactly: []`
     });
 
     let responseText = message.content[0].text;
-    console.log(`📝 Claude response (first 500 chars): ${responseText.substring(0, 500)}`);
+    console.log(`📝 Claude stop_reason: ${message.stop_reason}, response length: ${responseText.length}`);
     responseText = responseText.replace(/```json\n?/gi, '').replace(/```\n?/g, '').trim();
+
+    // If response was truncated, try to salvage by closing the JSON array
+    if (message.stop_reason === 'max_tokens' && responseText.startsWith('[') && !responseText.endsWith(']')) {
+      console.log('⚠️ Response truncated, attempting to salvage...');
+      // Find the last complete object by finding the last '},' or '}'
+      const lastCompleteObj = responseText.lastIndexOf('}');
+      if (lastCompleteObj > 0) {
+        responseText = responseText.substring(0, lastCompleteObj + 1) + ']';
+      }
+    }
 
     const jsonMatch = responseText.match(/\[[\s\S]*\]/);
     if (!jsonMatch) {
