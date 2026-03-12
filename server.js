@@ -128,11 +128,13 @@ const rateLimit = (maxRequests, windowMs) => (req, res, next) => {
 
 // Helper function to extract transactions directly from PDF buffer using Claude's native PDF support
 async function extractTransactionsFromPDF(pdfBuffer) {
-  try {
-    const base64PDF = pdfBuffer.toString('base64');
-    console.log(`📄 Sending PDF directly to Claude (${(pdfBuffer.length / 1024).toFixed(0)}KB)`);
+  const base64PDF = pdfBuffer.toString('base64');
+  console.log(`📄 Sending PDF directly to Claude (${(pdfBuffer.length / 1024).toFixed(0)}KB)`);
 
-    const stream = await anthropic.messages.stream({
+  const MAX_RETRIES = 3;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const stream = await anthropic.messages.stream({
       model: "claude-sonnet-4-6",
       max_tokens: 32000,
       messages: [{
@@ -197,9 +199,19 @@ If no transactions found, respond with exactly: []`
     const transactions = JSON.parse(jsonMatch[0]);
     console.log(`✅ Extracted ${transactions.length} transactions from PDF`);
     return transactions;
-  } catch (error) {
-    console.error('❌ Error extracting transactions from PDF:', error);
-    throw error;
+    } catch (error) {
+      const status = error.status || error.statusCode;
+      if ((status === 429 || status === 529) && attempt < MAX_RETRIES) {
+        // Parse retry-after header or use escalating delay
+        const retryAfter = error.headers?.['retry-after'];
+        const delay = retryAfter ? (parseInt(retryAfter) + 5) * 1000 : [90000, 120000, 180000][attempt];
+        console.log(`⏳ Rate limited (${status}), waiting ${delay/1000}s before retry (attempt ${attempt + 1}/${MAX_RETRIES})`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        continue;
+      }
+      console.error('❌ Error extracting transactions from PDF:', error);
+      throw error;
+    }
   }
 }
 
@@ -544,6 +556,12 @@ async function processStatementsInBackground(user_id) {
 
         processedCount++;
 
+        // Wait 90 seconds between statements to respect 30k input tokens/min rate limit
+        if (i < pendingStatements.length - 1) {
+          console.log(`[Batch] Waiting 90s before next statement (rate limit: 30k tokens/min)...`);
+          await new Promise(resolve => setTimeout(resolve, 90000));
+        }
+
       } catch (stmtError) {
         console.error(`[Batch] Error processing statement ${stmt.id} (${stmt.filename}):`, stmtError);
         await supabaseAdmin
@@ -551,7 +569,12 @@ async function processStatementsInBackground(user_id) {
           .update({ status: 'failed' })
           .eq('id', stmt.id);
         failedCount++;
-        // Continue with next statement
+
+        // Still wait after failures to let rate limit reset
+        if (i < pendingStatements.length - 1) {
+          console.log(`[Batch] Waiting 90s after failure before next statement...`);
+          await new Promise(resolve => setTimeout(resolve, 90000));
+        }
       }
     }
 
@@ -2218,7 +2241,7 @@ Respond with ONLY valid JSON:
  */
 app.post('/api/smart_categorize', requireAuth, async (req, res) => {
   try {
-    const user_id = req.user_id;
+    const user_id = req.body.user_id || req.user?.id;
     console.log(`[SmartCat] Starting smart categorization for user: ${user_id}`);
 
     // 1. Fetch uncategorized transactions
@@ -2487,7 +2510,7 @@ Return ONLY a valid JSON array. No markdown, no explanation outside the JSON.
  */
 app.post('/api/get_review_transactions', requireAuth, async (req, res) => {
   try {
-    const user_id = req.user_id;
+    const user_id = req.body.user_id || req.user?.id;
 
     // Get all uploaded transactions with auto_status set
     const { data: transactions, error } = await supabaseAdmin
@@ -2569,7 +2592,7 @@ app.post('/api/get_review_transactions', requireAuth, async (req, res) => {
  */
 app.post('/api/confirm_categorization', requireAuth, async (req, res) => {
   try {
-    const user_id = req.user_id;
+    const user_id = req.body.user_id || req.user?.id;
     const { transaction_ids, action, correction } = req.body;
     // action: 'confirm' or 'correct'
     // correction: { category_id, category_name, business_percent, tax_deductible } (only for 'correct')
