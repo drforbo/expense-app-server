@@ -370,7 +370,7 @@ Respond with ONLY valid JSON:
   }]
 }`;
 
-  const MAX_RETRIES = 3;
+  const MAX_RETRIES = 4;
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
       const message = await anthropic.messages.create({
@@ -398,7 +398,7 @@ Respond with ONLY valid JSON:
       const isRetryable = status === 529 || status === 429 || status === 500 || status === 503;
 
       if (isRetryable && attempt < MAX_RETRIES) {
-        const delay = Math.pow(2, attempt + 1) * 1000; // 2s, 4s, 8s
+        const delay = [5000, 15000, 30000, 60000][attempt]; // 5s, 15s, 30s, 60s
         console.log(`[Retry] Q1 for ${merchantName} failed (${status}), retrying in ${delay/1000}s (attempt ${attempt + 1}/${MAX_RETRIES})`);
         await new Promise(resolve => setTimeout(resolve, delay));
         continue;
@@ -589,25 +589,24 @@ async function processStatementsInBackground(user_id) {
               date: t.transaction_date
             }));
 
-            // Process in batches to avoid rate limits
-            const Q1_BATCH_SIZE = 8;
-            const Q1_BATCH_DELAY = 12000;
+            // Process sequentially to avoid overloading API
+            let q1SuccessCount = 0;
 
-            for (let i = 0; i < formattedTransactions.length; i += Q1_BATCH_SIZE) {
-              const batch = formattedTransactions.slice(i, i + Q1_BATCH_SIZE);
-              const batchPromises = batch.map(t => generateQ1ForTransaction(t, userProfile));
-              await Promise.all(batchPromises);
+            for (let i = 0; i < formattedTransactions.length; i++) {
+              const result = await generateQ1ForTransaction(formattedTransactions[i], userProfile);
+              if (result.questions) q1SuccessCount++;
 
-              const progress = Math.min(i + Q1_BATCH_SIZE, formattedTransactions.length);
-              console.log(`[Batch] Q1 generated for ${progress}/${formattedTransactions.length} transactions`);
+              if ((i + 1) % 10 === 0 || i === formattedTransactions.length - 1) {
+                console.log(`[Batch] Q1 generated for ${q1SuccessCount}/${i + 1} transactions (${formattedTransactions.length} total)`);
+              }
 
-              // Add delay between batches (except for the last batch)
-              if (i + Q1_BATCH_SIZE < formattedTransactions.length) {
-                await new Promise(resolve => setTimeout(resolve, Q1_BATCH_DELAY));
+              // Small delay between each request
+              if (i < formattedTransactions.length - 1) {
+                await new Promise(resolve => setTimeout(resolve, 1500));
               }
             }
 
-            console.log(`[Batch] Q1 generation complete`);
+            console.log(`[Batch] Q1 generation complete: ${q1SuccessCount}/${formattedTransactions.length} succeeded`);
           }
         }
       } catch (q1Error) {
