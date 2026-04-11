@@ -123,6 +123,11 @@ const rateLimit = (maxRequests, windowMs) => (req, res, next) => {
   next();
 };
 
+// Health check endpoint (no auth required)
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
 // ============================================
 // PDF BANK STATEMENT UPLOAD & TRANSACTION EXTRACTION
 // ============================================
@@ -1714,7 +1719,19 @@ FOR BUSINESS/SELF-EMPLOYMENT INCOME:
       console.log('🤖 AI Response:', responseText);
 
       responseText = responseText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-      const categorization = JSON.parse(responseText);
+      let categorization;
+      try {
+        categorization = JSON.parse(responseText);
+      } catch (parseError) {
+        console.error('❌ Failed to parse income categorization JSON. Raw response:', responseText);
+        categorization = {
+          categoryId: 'other_income',
+          categoryName: 'Other Income',
+          businessPercent: 100,
+          explanation: 'Could not auto-categorize — please review manually',
+          taxDeductible: true
+        };
+      }
 
       console.log('✅ Categorized income as:', categorization.categoryId);
       res.json(categorization);
@@ -2061,7 +2078,19 @@ FOR SPLIT TRANSACTIONS (mixed shopping with business items):
     // Strip markdown code blocks if present
     responseText = responseText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
 
-    const categorization = JSON.parse(responseText);
+    let categorization;
+    try {
+      categorization = JSON.parse(responseText);
+    } catch (parseError) {
+      console.error('❌ Failed to parse expense categorization JSON. Raw response:', responseText);
+      categorization = {
+        categoryId: 'personal',
+        categoryName: 'Uncategorized',
+        businessPercent: 0,
+        explanation: 'Could not auto-categorize — please review manually',
+        taxDeductible: false
+      };
+    }
 
     console.log('✅ Categorized as:', categorization.categoryId, `(${categorization.businessPercent}%)`);
     res.json(categorization);
@@ -2168,7 +2197,19 @@ Respond with ONLY valid JSON:
 
         let responseText = message.content[0].text;
         responseText = responseText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-        const categorization = JSON.parse(responseText);
+        let categorization;
+        try {
+          categorization = JSON.parse(responseText);
+        } catch (parseError) {
+          console.error(`❌ Failed to parse bulk categorization JSON for ${transaction.name}. Raw response:`, responseText);
+          categorization = {
+            categoryId: 'personal',
+            categoryName: 'Uncategorized',
+            businessPercent: 0,
+            explanation: 'Could not auto-categorize — please review manually',
+            taxDeductible: false
+          };
+        }
 
         // Save to Supabase using admin client (bypasses RLS for server-side operations)
         const { error } = await supabaseAdmin
@@ -2864,7 +2905,19 @@ FOR SPLIT TRANSACTIONS (if feedback indicates splitting):
     // Strip markdown code blocks if present
     responseText = responseText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
 
-    const newCategorization = JSON.parse(responseText);
+    let newCategorization;
+    try {
+      newCategorization = JSON.parse(responseText);
+    } catch (parseError) {
+      console.error('❌ Failed to parse re-categorization JSON. Raw response:', responseText);
+      newCategorization = {
+        categoryId: 'personal',
+        categoryName: 'Uncategorized',
+        businessPercent: 0,
+        explanation: 'Could not auto-categorize — please review manually',
+        taxDeductible: false
+      };
+    }
 
     // FIX: For income splits, ensure business income has taxDeductible: true
     const isIncome = transaction.amount < 0; // Negative = income in Plaid
@@ -3641,7 +3694,16 @@ If you cannot identify the item clearly, use your best judgment based on what yo
       throw new Error('Could not parse AI response');
     }
 
-    const result = JSON.parse(jsonMatch[0]);
+    let result;
+    try {
+      result = JSON.parse(jsonMatch[0]);
+    } catch (parseError) {
+      console.error('❌ Failed to parse item recognition JSON. Raw response:', responseText);
+      result = {
+        item_name: 'Unknown Item',
+        estimated_rrp: 0
+      };
+    }
 
     console.log('✅ Item recognized:', result.item_name, '- £' + result.estimated_rrp);
 
@@ -4792,6 +4854,12 @@ app.post('/api/get_confirmed_subscriptions', requireAuth, async (req, res) => {
     console.error('❌ Error getting confirmed subscriptions:', error);
     res.status(500).json({ error: error.message });
   }
+});
+
+// Global error handler — catches unhandled errors in route handlers
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err);
+  res.status(500).json({ error: 'Internal server error' });
 });
 
 const PORT = process.env.PORT || 3000;
