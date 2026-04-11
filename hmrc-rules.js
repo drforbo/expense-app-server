@@ -2,8 +2,8 @@
  * HMRC Tax Rules Configuration
  *
  * IMPORTANT: This file contains UK HMRC tax rules for self-employed individuals
- * Last Updated: 2025-11-30
- * Tax Year: 2025/26
+ * Last Updated: 2026-04-11
+ * Tax Year: 2026/27
  *
  * SOURCES:
  * - HMRC Self-Employment Guide: https://www.gov.uk/expenses-if-youre-self-employed
@@ -21,10 +21,75 @@
 module.exports = {
   // Last update metadata
   metadata: {
-    lastUpdated: '2025-11-30',
-    taxYear: '2025/26',
-    version: '1.1.0',
-    reviewedBy: 'Updated for 2025/26 tax year',
+    lastUpdated: '2026-04-11',
+    taxYear: '2026/27',
+    version: '1.2.0',
+    reviewedBy: 'Updated for 2026/27 tax year',
+  },
+
+  // Income tax rates and bands
+  // Source: https://www.gov.uk/income-tax-rates
+  income_tax: {
+    personal_allowance: 12570,  // £12,570 (frozen until 2028)
+    basic_rate: {
+      rate: 0.20,  // 20%
+      band: 37700,  // £37,700 (taxable income £0-£37,700, total income up to £50,270)
+    },
+    higher_rate: {
+      rate: 0.40,  // 40%
+      threshold: 50271,  // £50,271-£125,140
+    },
+    additional_rate: {
+      rate: 0.45,  // 45%
+      threshold: 125140,  // £125,140+
+    },
+    marriage_allowance: 1260,  // £1,260 transferable to spouse
+    trading_allowance: 1000,  // £1,000 tax-free trading income
+  },
+
+  // National Insurance contributions for self-employed
+  // Source: https://www.gov.uk/self-employed-national-insurance-rates
+  national_insurance: {
+    class_2: {
+      rate_per_week: 3.45,  // £3.45/week
+      small_profits_threshold: 6725,  // £6,725 annual
+      note: 'Voluntary if profits below threshold, but pays for state pension eligibility',
+    },
+    class_4: {
+      lower_rate: 0.06,  // 6% on profits between £12,570 and £50,270
+      lower_threshold: 12570,
+      upper_threshold: 50270,
+      upper_rate: 0.02,  // 2% on profits above £50,270
+    },
+  },
+
+  // Student loan repayment thresholds
+  // Source: https://www.gov.uk/repaying-your-student-loan/what-you-pay
+  student_loans: {
+    plan_1: {
+      threshold: 24990,  // £24,990
+      rate: 0.09,  // 9%
+    },
+    plan_2: {
+      threshold: 27295,  // £27,295
+      rate: 0.09,  // 9%
+    },
+    plan_4: {
+      threshold: 31395,  // £31,395
+      rate: 0.09,  // 9%
+    },
+    postgraduate: {
+      threshold: 21000,  // £21,000
+      rate: 0.06,  // 6%
+    },
+  },
+
+  // Making Tax Digital for Income Tax Self Assessment (MTD for ITSA)
+  // Source: https://www.gov.uk/guidance/use-making-tax-digital-for-income-tax
+  mtd_itsa: {
+    mandatory_from: '2026-04-06',
+    income_threshold: 50000,  // £50,000 — mandatory for income over this from April 2026
+    note: 'Quarterly digital submissions required. Threshold drops to £30,000 from April 2027.',
   },
 
   // Mileage allowance rates (HMRC Approved Mileage Allowance Payment)

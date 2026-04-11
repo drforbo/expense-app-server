@@ -14,8 +14,9 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.69.0",
-    "@supabase/supabase-js": "^2.84.0",
+    "@anthropic-ai/sdk": "^0.88.0",
+    "@supabase/supabase-js": "^2.103.0",
+    "archiver": "^7.0.1",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^5.1.0",

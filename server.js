@@ -6,6 +6,7 @@ const crypto = require('crypto');
 const multer = require('multer');
 const pdfParse = require('pdf-parse');
 const { google } = require('googleapis');
+const archiver = require('archiver');
 const hmrcRules = require('./hmrc-rules');
 require('dotenv').config();
 
@@ -387,7 +388,7 @@ Respond with ONLY valid JSON:
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
       const message = await anthropic.messages.create({
-        model: "claude-sonnet-4-6",
+        model: "claude-haiku-4-5-20251001",
         max_tokens: 400,
         messages: [{ role: "user", content: prompt }]
       });
@@ -1214,7 +1215,7 @@ CRITICAL: Your follow-up MUST acknowledge their previous answer naturally. Do NO
 Respond with ONLY valid JSON.`;
 
       const message = await anthropic.messages.create({
-        model: "claude-sonnet-4-6",
+        model: "claude-haiku-4-5-20251001",
         max_tokens: 500,
         messages: [{ role: "user", content: incomePrompt }]
       });
@@ -1418,7 +1419,7 @@ No follow-up needed examples:
 Respond with ONLY valid JSON.`);
 
     const message = await anthropic.messages.create({
-      model: "claude-sonnet-4-6", // Use Haiku for faster question generation
+      model: "claude-haiku-4-5-20251001", // Use Haiku for faster question generation
       max_tokens: 500,
       messages: [{ role: "user", content: prompt }]
     });
@@ -1704,7 +1705,7 @@ FOR BUSINESS/SELF-EMPLOYMENT INCOME:
 }`;
 
       const message = await anthropic.messages.create({
-        model: "claude-sonnet-4-6",
+        model: "claude-haiku-4-5-20251001",
         max_tokens: 600,
         messages: [{ role: "user", content: incomePrompt }]
       });
@@ -2049,7 +2050,7 @@ FOR SPLIT TRANSACTIONS (mixed shopping with business items):
 
 
     const message = await anthropic.messages.create({
-      model: "claude-sonnet-4-6",
+      model: "claude-haiku-4-5-20251001",
       max_tokens: 800,
       messages: [{ role: "user", content: prompt }]
     });
@@ -2160,7 +2161,7 @@ Respond with ONLY valid JSON:
 
         // Call AI to categorize
         const message = await anthropic.messages.create({
-          model: "claude-sonnet-4-6",
+          model: "claude-haiku-4-5-20251001",
           max_tokens: 600,
           messages: [{ role: "user", content: prompt }]
         });
@@ -2852,7 +2853,7 @@ FOR SPLIT TRANSACTIONS (if feedback indicates splitting):
 }`;
 
     const message = await anthropic.messages.create({
-      model: "claude-sonnet-4-6",
+      model: "claude-haiku-4-5-20251001",
       max_tokens: 800,
       messages: [{ role: "user", content: prompt }]
     });
@@ -3205,6 +3206,203 @@ app.post('/api/export_transactions', requireAuth, async (req, res) => {
   } catch (error) {
     console.error('❌ Error exporting transactions:', error);
     res.status(500).json({ error: error.message });
+  }
+});
+
+// ZIP export: CSV + receipt files bundled together
+app.post('/api/export_bundle', requireAuth, async (req, res) => {
+  try {
+    const { user_id, start_date, end_date } = req.body;
+
+    if (!user_id) {
+      return res.status(400).json({ error: 'user_id is required' });
+    }
+
+    console.log('📦 Exporting transaction bundle for user:', user_id);
+
+    // Fetch categorized transactions
+    let query = supabaseAdmin
+      .from('categorized_transactions')
+      .select('*')
+      .eq('user_id', user_id);
+
+    if (start_date) query = query.gte('transaction_date', start_date);
+    if (end_date) query = query.lte('transaction_date', end_date);
+
+    const { data: transactions, error } = await query.order('transaction_date', { ascending: false });
+    if (error) {
+      console.error('❌ Error fetching transactions:', error);
+      return res.status(500).json({ error: error.message });
+    }
+
+    // Fetch gifted items
+    let giftedQuery = supabaseAdmin
+      .from('gifted_items')
+      .select('*')
+      .eq('user_id', user_id);
+    if (start_date) giftedQuery = giftedQuery.gte('received_date', start_date);
+    if (end_date) giftedQuery = giftedQuery.lte('received_date', end_date);
+
+    const { data: giftedItems } = await giftedQuery.order('received_date', { ascending: false });
+
+    if ((!transactions || transactions.length === 0) && (!giftedItems || giftedItems.length === 0)) {
+      return res.status(404).json({ error: 'No transactions found' });
+    }
+
+    // Build enhanced CSV with evidence columns
+    const csvHeaders = [
+      'Date',
+      'Merchant',
+      'Total Amount (£)',
+      'Business Amount (£)',
+      'Personal Amount (£)',
+      'Business %',
+      'Type',
+      'HMRC Category',
+      'Tax Deductible',
+      'Qualified',
+      'Business Use Explanation',
+      'Content Link',
+      'Receipt File',
+      'Notes',
+    ];
+
+    const escCsv = (str) => {
+      if (!str) return '""';
+      return `"${String(str).replace(/"/g, '""').replace(/\n/g, ' ')}"`;
+    };
+
+    // Track receipts to download
+    const receiptFiles = [];
+
+    const csvRows = (transactions || []).map((txn, idx) => {
+      const totalAmount = Math.abs(txn.amount);
+      const businessPercent = txn.business_percent || 0;
+      const businessAmount = (totalAmount * businessPercent / 100).toFixed(2);
+      const personalAmount = (totalAmount * (100 - businessPercent) / 100).toFixed(2);
+
+      let type = 'Personal';
+      if (businessPercent === 100) type = 'Business';
+      else if (businessPercent > 0) type = 'Split';
+
+      // Build a readable receipt filename
+      let receiptFilename = '';
+      if (txn.receipt_image_url) {
+        const ext = txn.receipt_image_url.split('.').pop()?.split('?')[0] || 'jpg';
+        const safeDate = (txn.transaction_date || 'unknown').replace(/\//g, '-');
+        const safeMerchant = (txn.merchant_name || 'unknown')
+          .replace(/[^a-zA-Z0-9]/g, '_')
+          .substring(0, 30);
+        receiptFilename = `${safeDate}_${safeMerchant}_${totalAmount.toFixed(2)}.${ext}`;
+
+        receiptFiles.push({
+          url: txn.receipt_image_url,
+          filename: receiptFilename,
+        });
+      }
+
+      return [
+        txn.transaction_date,
+        escCsv(txn.merchant_name),
+        totalAmount.toFixed(2),
+        businessAmount,
+        personalAmount,
+        businessPercent,
+        type,
+        escCsv(txn.category_name || 'Uncategorized'),
+        txn.tax_deductible ? 'Yes' : 'No',
+        txn.qualified ? 'Yes' : 'No',
+        escCsv(txn.business_use_explanation),
+        escCsv(txn.content_link),
+        receiptFilename ? `receipts/${receiptFilename}` : '',
+        escCsv(txn.explanation),
+      ].join(',');
+    });
+
+    // Gifted item rows
+    const giftedRows = (giftedItems || []).map(item => {
+      const rrp = parseFloat(item.rrp || 0);
+      return [
+        item.received_date,
+        escCsv(item.item_name || 'Gifted Item'),
+        rrp.toFixed(2),
+        rrp.toFixed(2),
+        '0.00',
+        '100',
+        'Income',
+        '"Gifted Item (Income)"',
+        'Yes',
+        'Yes',
+        escCsv(`GIFTED: ${item.item_name}${item.received_from ? ' from ' + item.received_from : ''}`),
+        '""',
+        '',
+        escCsv(item.notes),
+      ].join(',');
+    });
+
+    const csv = [csvHeaders.join(','), ...csvRows, ...giftedRows].join('\n');
+
+    // Set up ZIP stream
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', 'attachment; filename="bopp_export.zip"');
+
+    const archive = archiver('zip', { zlib: { level: 5 } });
+    archive.on('error', (err) => {
+      console.error('❌ Archive error:', err);
+      if (!res.headersSent) res.status(500).json({ error: 'ZIP creation failed' });
+    });
+    archive.pipe(res);
+
+    // Add CSV to archive
+    archive.append(csv, { name: 'transactions.csv' });
+
+    // Download and add each receipt
+    let downloadedCount = 0;
+    for (const receipt of receiptFiles) {
+      try {
+        // Extract the storage path from the public URL
+        // URL format: https://{project}.supabase.co/storage/v1/object/public/receipts/{path}
+        const urlParts = receipt.url.split('/storage/v1/object/public/receipts/');
+        if (urlParts.length < 2) {
+          console.warn('⚠️  Skipping receipt with unexpected URL format:', receipt.url);
+          continue;
+        }
+        const storagePath = decodeURIComponent(urlParts[1]);
+
+        const { data: fileData, error: fileError } = await supabaseAdmin.storage
+          .from('receipts')
+          .download(storagePath);
+
+        if (fileError || !fileData) {
+          console.warn('⚠️  Failed to download receipt:', storagePath, fileError?.message);
+          continue;
+        }
+
+        const buffer = Buffer.from(await fileData.arrayBuffer());
+        archive.append(buffer, { name: `receipts/${receipt.filename}` });
+        downloadedCount++;
+      } catch (dlErr) {
+        console.warn('⚠️  Error downloading receipt:', receipt.filename, dlErr.message);
+      }
+    }
+
+    console.log(`✅ Bundle: ${csvRows.length + giftedRows.length} transactions, ${downloadedCount}/${receiptFiles.length} receipts`);
+
+    // Update last export date
+    try {
+      await supabaseAdmin
+        .from('user_profiles')
+        .update({ last_export_date: new Date().toISOString() })
+        .eq('user_id', user_id);
+    } catch (updateError) {
+      console.error('⚠️  Failed to update last_export_date:', updateError);
+    }
+
+    await archive.finalize();
+
+  } catch (error) {
+    console.error('❌ Error exporting bundle:', error);
+    if (!res.headersSent) res.status(500).json({ error: error.message });
   }
 });
 
@@ -3861,7 +4059,7 @@ Return JSON array:
 Only include emails that seem relevant. Return empty array [] if none match.`;
 
         const analysis = await anthropic.messages.create({
-          model: 'claude-sonnet-4-6',
+          model: 'claude-haiku-4-5-20251001',
           max_tokens: 1000,
           messages: [{ role: 'user', content: analysisPrompt }]
         });
