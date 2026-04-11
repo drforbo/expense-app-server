@@ -644,8 +644,8 @@ async function processStatementsInBackground(user_id) {
             historySummary += `- ${data.merchant} (${data.entries.length} times): ${countStr}\n`;
           }
 
-          // Process in chunks of 50
-          const CHUNK_SIZE = 50;
+          // Process in smaller chunks to stay within rate limits
+          const CHUNK_SIZE = 10;
           let autoCount = 0;
           let reviewCount = 0;
 
@@ -766,7 +766,7 @@ Return ONLY valid JSON array:
             }
 
             if (i + CHUNK_SIZE < newTransactions.length) {
-              await new Promise(resolve => setTimeout(resolve, 2000));
+              await new Promise(resolve => setTimeout(resolve, 5000));
             }
           }
 
@@ -2442,8 +2442,8 @@ app.post('/api/smart_categorize', requireAuth, async (req, res) => {
       return `${t.id} | ${t.merchant_name} | £${Math.abs(parseFloat(t.amount)).toFixed(2)} | ${t.transaction_date} | ${isIncome ? 'INCOME' : 'EXPENSE'}`;
     }).join('\n');
 
-    // 7. Process in chunks of 50 to stay within token limits
-    const CHUNK_SIZE = 50;
+    // 7. Process in smaller chunks to stay within rate limits
+    const CHUNK_SIZE = 10;
     const allResults = [];
 
     for (let i = 0; i < uncategorized.length; i += CHUNK_SIZE) {
@@ -2597,9 +2597,9 @@ Return ONLY a valid JSON array. No markdown, no explanation outside the JSON.
         allResults.push(...chunkResults);
       }
 
-      // Delay between chunks
+      // Delay between chunks to avoid rate limits
       if (i + CHUNK_SIZE < uncategorized.length) {
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        await new Promise(resolve => setTimeout(resolve, 5000));
       }
     }
 
@@ -4274,6 +4274,752 @@ Only include emails that seem relevant. Return empty array [] if none match.`;
 });
 
 // ============================================
+// HMRC MTD - OAUTH & API INTEGRATION
+// ============================================
+
+// HMRC OAuth configuration
+const HMRC_CONFIG = {
+  sandbox: {
+    authorizeUrl: 'https://test-www.tax.service.gov.uk/oauth/authorize',
+    tokenUrl: 'https://test-api.service.hmrc.gov.uk/oauth/token',
+    apiBaseUrl: 'https://test-api.service.hmrc.gov.uk',
+  },
+  production: {
+    authorizeUrl: 'https://www.tax.service.gov.uk/oauth/authorize',
+    tokenUrl: 'https://api.service.hmrc.gov.uk/oauth/token',
+    apiBaseUrl: 'https://api.service.hmrc.gov.uk',
+  },
+};
+
+const HMRC_ENV = process.env.HMRC_ENV || 'sandbox';
+const HMRC_SCOPES = 'read:self-assessment write:self-assessment';
+
+function getHmrcConfig() {
+  return HMRC_CONFIG[HMRC_ENV] || HMRC_CONFIG.sandbox;
+}
+
+/**
+ * Helper: refresh HMRC access token if expired
+ * Returns the current (or refreshed) access token
+ */
+async function refreshHmrcTokenIfNeeded(userId) {
+  const { data: conn, error } = await supabaseAdmin
+    .from('hmrc_connections')
+    .select('*')
+    .eq('user_id', userId)
+    .eq('is_active', true)
+    .single();
+
+  if (error || !conn) return null;
+
+  // Check if token expires within 5 minutes
+  const expiresAt = new Date(conn.token_expires_at);
+  const fiveMinFromNow = new Date(Date.now() + 5 * 60 * 1000);
+
+  if (expiresAt > fiveMinFromNow) {
+    return conn; // Token still valid
+  }
+
+  // Refresh the token
+  console.log('[HMRC] Refreshing expired access token...');
+  const config = getHmrcConfig();
+
+  const tokenResponse = await fetch(config.tokenUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'refresh_token',
+      client_id: process.env.HMRC_CLIENT_ID,
+      client_secret: process.env.HMRC_CLIENT_SECRET,
+      refresh_token: conn.refresh_token,
+    }),
+  });
+
+  if (!tokenResponse.ok) {
+    const err = await tokenResponse.text();
+    console.error('[HMRC] Token refresh failed:', err);
+    // Mark connection as inactive if refresh fails
+    await supabaseAdmin
+      .from('hmrc_connections')
+      .update({ is_active: false })
+      .eq('user_id', userId);
+    return null;
+  }
+
+  const tokens = await tokenResponse.json();
+  const newExpiresAt = new Date(Date.now() + tokens.expires_in * 1000).toISOString();
+
+  const { error: updateError } = await supabaseAdmin
+    .from('hmrc_connections')
+    .update({
+      access_token: tokens.access_token,
+      refresh_token: tokens.refresh_token, // HMRC issues new refresh token each time
+      token_expires_at: newExpiresAt,
+      last_refreshed_at: new Date().toISOString(),
+    })
+    .eq('user_id', userId);
+
+  if (updateError) {
+    console.error('[HMRC] Failed to save refreshed tokens:', updateError);
+    return null;
+  }
+
+  console.log('[HMRC] Token refreshed successfully');
+  return { ...conn, access_token: tokens.access_token, token_expires_at: newExpiresAt };
+}
+
+/**
+ * Helper: make an authenticated HMRC API call with fraud prevention headers
+ */
+async function hmrcApiCall(method, path, accessToken, body = null, req = null) {
+  const config = getHmrcConfig();
+  const url = `${config.apiBaseUrl}${path}`;
+
+  const headers = {
+    'Authorization': `Bearer ${accessToken}`,
+    'Accept': 'application/vnd.hmrc.2.0+json',
+    'Content-Type': 'application/json',
+  };
+
+  // Fraud prevention headers (required by HMRC for all MTD calls)
+  if (req) {
+    headers['Gov-Client-Connection-Method'] = 'MOBILE_APP_VIA_SERVER';
+    headers['Gov-Vendor-Version'] = `bopp=1.1.0`;
+    headers['Gov-Vendor-Product-Name'] = 'Bopp';
+    if (req.ip) {
+      headers['Gov-Client-Public-IP'] = req.ip;
+    }
+    if (req.headers['user-agent']) {
+      headers['Gov-Client-User-Agent'] = req.headers['user-agent'];
+    }
+    headers['Gov-Vendor-Public-IP'] = req.socket?.localAddress || '';
+  }
+
+  const options = { method, headers };
+  if (body && (method === 'POST' || method === 'PUT')) {
+    options.body = JSON.stringify(body);
+  }
+
+  const response = await fetch(url, options);
+  const data = response.status !== 204 ? await response.json() : null;
+
+  if (!response.ok) {
+    const error = new Error(`HMRC API error: ${response.status}`);
+    error.status = response.status;
+    error.hmrcError = data;
+    throw error;
+  }
+
+  return data;
+}
+
+/**
+ * Generate HMRC authorization URL
+ * POST /api/hmrc/auth-url
+ */
+app.post('/api/hmrc/auth-url', requireAuth, async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    if (!process.env.HMRC_CLIENT_ID || !process.env.HMRC_REDIRECT_URI) {
+      return res.status(500).json({ error: 'HMRC integration not configured' });
+    }
+
+    // Generate a cryptographic state token for CSRF protection
+    const state = crypto.randomBytes(32).toString('hex');
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString(); // 10 min expiry
+
+    // Store state in database
+    const { error: stateError } = await supabaseAdmin
+      .from('hmrc_oauth_states')
+      .insert({
+        state,
+        user_id: userId,
+        expires_at: expiresAt,
+      });
+
+    if (stateError) {
+      console.error('[HMRC] Failed to store OAuth state:', stateError);
+      return res.status(500).json({ error: 'Failed to initiate HMRC connection' });
+    }
+
+    const config = getHmrcConfig();
+    const params = new URLSearchParams({
+      response_type: 'code',
+      client_id: process.env.HMRC_CLIENT_ID,
+      scope: HMRC_SCOPES,
+      redirect_uri: process.env.HMRC_REDIRECT_URI,
+      state,
+    });
+
+    const authUrl = `${config.authorizeUrl}?${params.toString()}`;
+
+    console.log(`[HMRC] Auth URL generated for user ${userId} (${HMRC_ENV})`);
+    res.json({ authUrl, state });
+
+  } catch (error) {
+    console.error('[HMRC] Auth URL error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * HMRC OAuth callback — handles redirect from HMRC after user authorizes
+ * GET /api/hmrc/callback
+ * No requireAuth — this is a redirect from HMRC's servers
+ */
+app.get('/api/hmrc/callback', async (req, res) => {
+  try {
+    const { code, state, error: hmrcError, error_description } = req.query;
+
+    if (hmrcError) {
+      console.error(`[HMRC] OAuth error: ${hmrcError} — ${error_description}`);
+      return res.redirect(`bopp://hmrc-connected?success=false&error=${encodeURIComponent(error_description || hmrcError)}`);
+    }
+
+    if (!code || !state) {
+      return res.redirect('bopp://hmrc-connected?success=false&error=missing_params');
+    }
+
+    // Verify state token
+    const { data: storedState, error: stateError } = await supabaseAdmin
+      .from('hmrc_oauth_states')
+      .select('*')
+      .eq('state', state)
+      .single();
+
+    if (stateError || !storedState) {
+      console.error('[HMRC] Invalid or expired OAuth state');
+      return res.redirect('bopp://hmrc-connected?success=false&error=invalid_state');
+    }
+
+    // Check expiry
+    if (new Date(storedState.expires_at) < new Date()) {
+      await supabaseAdmin.from('hmrc_oauth_states').delete().eq('state', state);
+      return res.redirect('bopp://hmrc-connected?success=false&error=state_expired');
+    }
+
+    const userId = storedState.user_id;
+
+    // Clean up used state
+    await supabaseAdmin.from('hmrc_oauth_states').delete().eq('state', state);
+
+    // Exchange authorization code for tokens
+    const config = getHmrcConfig();
+    const tokenResponse = await fetch(config.tokenUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'authorization_code',
+        client_id: process.env.HMRC_CLIENT_ID,
+        client_secret: process.env.HMRC_CLIENT_SECRET,
+        redirect_uri: process.env.HMRC_REDIRECT_URI,
+        code,
+      }),
+    });
+
+    if (!tokenResponse.ok) {
+      const err = await tokenResponse.text();
+      console.error('[HMRC] Token exchange failed:', err);
+      return res.redirect('bopp://hmrc-connected?success=false&error=token_exchange_failed');
+    }
+
+    const tokens = await tokenResponse.json();
+    const expiresAt = new Date(Date.now() + tokens.expires_in * 1000).toISOString();
+
+    console.log(`[HMRC] Tokens obtained for user ${userId}`);
+
+    // Store tokens in database
+    const { error: upsertError } = await supabaseAdmin
+      .from('hmrc_connections')
+      .upsert({
+        user_id: userId,
+        access_token: tokens.access_token,
+        refresh_token: tokens.refresh_token,
+        token_expires_at: expiresAt,
+        scope: tokens.scope || HMRC_SCOPES,
+        connected_at: new Date().toISOString(),
+        is_active: true,
+        environment: HMRC_ENV,
+      }, {
+        onConflict: 'user_id',
+      });
+
+    if (upsertError) {
+      console.error('[HMRC] Failed to save tokens:', upsertError);
+      return res.redirect('bopp://hmrc-connected?success=false&error=save_failed');
+    }
+
+    // Fetch business details in background (non-blocking)
+    fetchAndStoreBusinessDetails(userId, tokens.access_token).catch(err => {
+      console.error('[HMRC] Background business details fetch failed:', err.message);
+    });
+
+    console.log(`[HMRC] Connection saved for user ${userId}`);
+    res.redirect('bopp://hmrc-connected?success=true');
+
+  } catch (error) {
+    console.error('[HMRC] Callback error:', error);
+    res.redirect(`bopp://hmrc-connected?success=false&error=${encodeURIComponent(error.message)}`);
+  }
+});
+
+/**
+ * Fetch business details from HMRC and store them
+ * Called after successful OAuth connection
+ */
+async function fetchAndStoreBusinessDetails(userId, accessToken) {
+  try {
+    // Get the user's NINO from their profile (or we need to ask for it)
+    const { data: profile } = await supabaseAdmin
+      .from('user_profiles')
+      .select('nino')
+      .eq('user_id', userId)
+      .single();
+
+    if (!profile?.nino) {
+      console.log('[HMRC] No NINO on profile yet — business details will be fetched later');
+      return;
+    }
+
+    const config = getHmrcConfig();
+    const response = await fetch(
+      `${config.apiBaseUrl}/individuals/business/details/${profile.nino}/list`,
+      {
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Accept': 'application/vnd.hmrc.2.0+json',
+        },
+      }
+    );
+
+    if (!response.ok) {
+      const err = await response.text();
+      console.error('[HMRC] Business details fetch failed:', err);
+      return;
+    }
+
+    const data = await response.json();
+    const businesses = data.listOfBusinesses || [];
+    const selfEmployment = businesses.find(b => b.typeOfBusiness === 'self-employment');
+
+    if (selfEmployment) {
+      await supabaseAdmin
+        .from('hmrc_connections')
+        .update({
+          hmrc_business_id: selfEmployment.businessId,
+          nino: profile.nino,
+          business_type: selfEmployment.typeOfBusiness,
+          trading_name: selfEmployment.tradingName || null,
+          quarterly_period_type: selfEmployment.quarterlyPeriodType || 'standard',
+        })
+        .eq('user_id', userId);
+
+      console.log(`[HMRC] Business details stored: ${selfEmployment.businessId}`);
+    } else {
+      console.log('[HMRC] No self-employment business found for this user');
+    }
+  } catch (error) {
+    console.error('[HMRC] fetchAndStoreBusinessDetails error:', error.message);
+  }
+}
+
+/**
+ * Get HMRC connection status
+ * POST /api/hmrc/status
+ */
+app.post('/api/hmrc/status', requireAuth, async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    const { data, error } = await supabaseAdmin
+      .from('hmrc_connections')
+      .select('connected_at, is_active, environment, hmrc_business_id, trading_name, quarterly_period_type, last_submission_at')
+      .eq('user_id', userId)
+      .single();
+
+    if (error && error.code !== 'PGRST116') throw error;
+
+    const connected = !!data && data.is_active;
+
+    res.json({
+      connected,
+      connection: connected ? {
+        connectedAt: data.connected_at,
+        environment: data.environment,
+        businessId: data.hmrc_business_id,
+        tradingName: data.trading_name,
+        quarterlyPeriodType: data.quarterly_period_type,
+        lastSubmissionAt: data.last_submission_at,
+        hasBusinessDetails: !!data.hmrc_business_id,
+      } : null,
+    });
+
+  } catch (error) {
+    console.error('[HMRC] Status error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * Disconnect HMRC account
+ * POST /api/hmrc/disconnect
+ */
+app.post('/api/hmrc/disconnect', requireAuth, async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    const { error } = await supabaseAdmin
+      .from('hmrc_connections')
+      .delete()
+      .eq('user_id', userId);
+
+    if (error) throw error;
+
+    console.log(`[HMRC] Disconnected for user ${userId}`);
+    res.json({ success: true });
+
+  } catch (error) {
+    console.error('[HMRC] Disconnect error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * Get MTD obligations (quarterly deadlines and their status)
+ * POST /api/hmrc/obligations
+ */
+app.post('/api/hmrc/obligations', requireAuth, async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    const conn = await refreshHmrcTokenIfNeeded(userId);
+    if (!conn) {
+      return res.status(401).json({ error: 'HMRC not connected or token expired' });
+    }
+
+    if (!conn.nino || !conn.hmrc_business_id) {
+      return res.status(400).json({ error: 'HMRC business details not configured. Please add your National Insurance number.' });
+    }
+
+    // Fetch obligations for current tax year
+    const taxYear = '2026-27'; // TODO: calculate dynamically
+    const data = await hmrcApiCall(
+      'GET',
+      `/obligations/details/${conn.nino}/income-and-expenditure?typeOfBusiness=self-employment&businessId=${conn.hmrc_business_id}&fromDate=2026-04-06&toDate=2027-04-05`,
+      conn.access_token,
+      null,
+      req
+    );
+
+    const obligations = (data.obligations || []).flatMap(o => o.obligationDetails || []);
+
+    res.json({
+      taxYear,
+      obligations: obligations.map(o => ({
+        periodStart: o.periodStartDate,
+        periodEnd: o.periodEndDate,
+        dueDate: o.dueDate,
+        status: o.status, // 'Open' or 'Fulfilled'
+        receivedDate: o.receivedDate || null,
+      })),
+    });
+
+  } catch (error) {
+    console.error('[HMRC] Obligations error:', error);
+    res.status(error.status || 500).json({
+      error: error.message,
+      hmrcError: error.hmrcError || null,
+    });
+  }
+});
+
+/**
+ * Submit cumulative quarterly update to HMRC
+ * POST /api/hmrc/submit-update
+ * Body: { taxYear: '2026-27' }
+ * Aggregates all categorized transactions for the year-to-date
+ */
+app.post('/api/hmrc/submit-update', requireAuth, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { taxYear } = req.body;
+
+    if (!taxYear) {
+      return res.status(400).json({ error: 'taxYear is required (e.g. "2026-27")' });
+    }
+
+    const conn = await refreshHmrcTokenIfNeeded(userId);
+    if (!conn) {
+      return res.status(401).json({ error: 'HMRC not connected or token expired' });
+    }
+
+    if (!conn.nino || !conn.hmrc_business_id) {
+      return res.status(400).json({ error: 'HMRC business details not configured' });
+    }
+
+    // Calculate tax year date range
+    const [startYear] = taxYear.split('-').map(Number);
+    const fromDate = `${startYear}-04-06`;
+    const toDate = `${startYear + 1}-04-05`;
+
+    // Fetch all categorized business transactions for this tax year
+    const { data: transactions, error: txError } = await supabaseAdmin
+      .from('categorized_transactions')
+      .select('amount, category_id, business_percent, tax_deductible')
+      .eq('user_id', userId)
+      .eq('tax_deductible', true)
+      .gte('transaction_date', fromDate)
+      .lte('transaction_date', toDate);
+
+    if (txError) throw txError;
+
+    // Aggregate expenses by HMRC field
+    const hmrcExpenses = {};
+    let totalIncome = 0;
+
+    for (const txn of transactions || []) {
+      const amount = Math.abs(txn.amount) * (txn.business_percent / 100);
+
+      if (txn.amount < 0) {
+        // Income (negative = money in)
+        totalIncome += amount;
+      } else {
+        // Expense (positive = money out)
+        const hmrcField = hmrcRules.category_to_hmrc_field[txn.category_id] || 'otherExpenses';
+        hmrcExpenses[hmrcField] = (hmrcExpenses[hmrcField] || 0) + amount;
+      }
+    }
+
+    // Round all values to 2 decimal places
+    for (const key of Object.keys(hmrcExpenses)) {
+      hmrcExpenses[key] = Math.round(hmrcExpenses[key] * 100) / 100;
+    }
+    totalIncome = Math.round(totalIncome * 100) / 100;
+
+    // Build the cumulative submission body
+    const submissionBody = {
+      periodIncome: {
+        turnover: totalIncome,
+      },
+      periodExpenses: hmrcExpenses,
+    };
+
+    // Submit to HMRC
+    const result = await hmrcApiCall(
+      'PUT',
+      `/individuals/business/self-employment/${conn.nino}/${conn.hmrc_business_id}/cumulative/${taxYear}`,
+      conn.access_token,
+      submissionBody,
+      req
+    );
+
+    // Update last submission timestamp
+    await supabaseAdmin
+      .from('hmrc_connections')
+      .update({ last_submission_at: new Date().toISOString() })
+      .eq('user_id', userId);
+
+    console.log(`[HMRC] Cumulative update submitted for user ${userId}, tax year ${taxYear}`);
+
+    res.json({
+      success: true,
+      submitted: submissionBody,
+      transactionCount: (transactions || []).length,
+      hmrcResponse: result,
+    });
+
+  } catch (error) {
+    console.error('[HMRC] Submit update error:', error);
+    res.status(error.status || 500).json({
+      error: error.message,
+      hmrcError: error.hmrcError || null,
+    });
+  }
+});
+
+/**
+ * Trigger an in-year tax calculation after submitting an update
+ * POST /api/hmrc/trigger-calculation
+ * Body: { taxYear: '2026-27' }
+ */
+app.post('/api/hmrc/trigger-calculation', requireAuth, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { taxYear, calculationType } = req.body;
+
+    if (!taxYear) {
+      return res.status(400).json({ error: 'taxYear is required' });
+    }
+
+    const conn = await refreshHmrcTokenIfNeeded(userId);
+    if (!conn) {
+      return res.status(401).json({ error: 'HMRC not connected or token expired' });
+    }
+
+    const type = calculationType || 'in-year';
+    const result = await hmrcApiCall(
+      'POST',
+      `/individuals/calculations/${conn.nino}/self-assessment/${taxYear}/trigger/${type}`,
+      conn.access_token,
+      {},
+      req
+    );
+
+    res.json({
+      success: true,
+      calculationId: result?.id || result?.calculationId,
+      hmrcResponse: result,
+    });
+
+  } catch (error) {
+    console.error('[HMRC] Trigger calculation error:', error);
+    res.status(error.status || 500).json({
+      error: error.message,
+      hmrcError: error.hmrcError || null,
+    });
+  }
+});
+
+/**
+ * Retrieve a tax calculation result
+ * POST /api/hmrc/get-calculation
+ * Body: { taxYear: '2026-27', calculationId: '...' }
+ */
+app.post('/api/hmrc/get-calculation', requireAuth, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { taxYear, calculationId } = req.body;
+
+    if (!taxYear || !calculationId) {
+      return res.status(400).json({ error: 'taxYear and calculationId are required' });
+    }
+
+    const conn = await refreshHmrcTokenIfNeeded(userId);
+    if (!conn) {
+      return res.status(401).json({ error: 'HMRC not connected or token expired' });
+    }
+
+    const result = await hmrcApiCall(
+      'GET',
+      `/individuals/calculations/${conn.nino}/self-assessment/${taxYear}/${calculationId}`,
+      conn.access_token,
+      null,
+      req
+    );
+
+    res.json({
+      calculation: result,
+    });
+
+  } catch (error) {
+    console.error('[HMRC] Get calculation error:', error);
+    res.status(error.status || 500).json({
+      error: error.message,
+      hmrcError: error.hmrcError || null,
+    });
+  }
+});
+
+/**
+ * Preview what would be submitted to HMRC (without actually submitting)
+ * POST /api/hmrc/preview-submission
+ * Body: { taxYear: '2026-27' }
+ */
+app.post('/api/hmrc/preview-submission', requireAuth, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { taxYear } = req.body;
+
+    if (!taxYear) {
+      return res.status(400).json({ error: 'taxYear is required' });
+    }
+
+    // Calculate tax year date range
+    const [startYear] = taxYear.split('-').map(Number);
+    const fromDate = `${startYear}-04-06`;
+    const toDate = `${startYear + 1}-04-05`;
+
+    // Fetch all categorized business transactions
+    const { data: transactions, error: txError } = await supabaseAdmin
+      .from('categorized_transactions')
+      .select('amount, category_id, category_name, business_percent, tax_deductible, merchant_name, transaction_date')
+      .eq('user_id', userId)
+      .eq('tax_deductible', true)
+      .gte('transaction_date', fromDate)
+      .lte('transaction_date', toDate)
+      .order('transaction_date', { ascending: true });
+
+    if (txError) throw txError;
+
+    // Aggregate by HMRC field
+    const hmrcExpenses = {};
+    const hmrcExpenseDetails = {}; // For showing breakdown
+    let totalIncome = 0;
+    let incomeCount = 0;
+    let expenseCount = 0;
+
+    for (const txn of transactions || []) {
+      const amount = Math.abs(txn.amount) * (txn.business_percent / 100);
+
+      if (txn.amount < 0) {
+        totalIncome += amount;
+        incomeCount++;
+      } else {
+        const hmrcField = hmrcRules.category_to_hmrc_field[txn.category_id] || 'otherExpenses';
+        hmrcExpenses[hmrcField] = (hmrcExpenses[hmrcField] || 0) + amount;
+        expenseCount++;
+
+        if (!hmrcExpenseDetails[hmrcField]) {
+          hmrcExpenseDetails[hmrcField] = { total: 0, categories: {} };
+        }
+        hmrcExpenseDetails[hmrcField].total += amount;
+        const catName = txn.category_name || txn.category_id;
+        hmrcExpenseDetails[hmrcField].categories[catName] =
+          (hmrcExpenseDetails[hmrcField].categories[catName] || 0) + amount;
+      }
+    }
+
+    // Round values
+    for (const key of Object.keys(hmrcExpenses)) {
+      hmrcExpenses[key] = Math.round(hmrcExpenses[key] * 100) / 100;
+    }
+    for (const key of Object.keys(hmrcExpenseDetails)) {
+      hmrcExpenseDetails[key].total = Math.round(hmrcExpenseDetails[key].total * 100) / 100;
+      for (const cat of Object.keys(hmrcExpenseDetails[key].categories)) {
+        hmrcExpenseDetails[key].categories[cat] = Math.round(hmrcExpenseDetails[key].categories[cat] * 100) / 100;
+      }
+    }
+    totalIncome = Math.round(totalIncome * 100) / 100;
+
+    const totalExpenses = Object.values(hmrcExpenses).reduce((sum, v) => sum + v, 0);
+
+    res.json({
+      taxYear,
+      period: { from: fromDate, to: toDate },
+      summary: {
+        totalIncome,
+        totalExpenses: Math.round(totalExpenses * 100) / 100,
+        netProfit: Math.round((totalIncome - totalExpenses) * 100) / 100,
+        transactionCount: (transactions || []).length,
+        incomeCount,
+        expenseCount,
+      },
+      submission: {
+        periodIncome: { turnover: totalIncome },
+        periodExpenses: hmrcExpenses,
+      },
+      breakdown: hmrcExpenseDetails,
+      canUseConsolidated: totalIncome < hmrcRules.consolidated_expenses_threshold,
+    });
+
+  } catch (error) {
+    console.error('[HMRC] Preview submission error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
 // SMART CATEGORIZATION - MERCHANT LEARNING
 // ============================================
 
@@ -4987,4 +5733,5 @@ app.listen(PORT, HOST, () => {
   console.log(`🤖 AI categorization: ${process.env.ANTHROPIC_API_KEY ? 'enabled' : 'disabled'}`);
   console.log(`💾 Supabase: ${process.env.SUPABASE_URL ? 'connected' : 'not configured'}`);
   console.log(`📧 Gmail integration: ${process.env.GOOGLE_CLIENT_ID ? 'enabled' : 'disabled'}`);
+  console.log(`🏛️  HMRC MTD: ${process.env.HMRC_CLIENT_ID ? `enabled (${HMRC_ENV})` : 'not configured'}`);
 });
