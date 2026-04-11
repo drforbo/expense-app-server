@@ -23,8 +23,8 @@ module.exports = {
   metadata: {
     lastUpdated: '2026-04-11',
     taxYear: '2026/27',
-    version: '1.2.0',
-    reviewedBy: 'Updated for 2026/27 tax year',
+    version: '1.3.0',
+    reviewedBy: 'Added MTD ITSA phased thresholds, quarterly deadlines, and category-to-HMRC field mapping',
   },
 
   // Income tax rates and bands
@@ -88,9 +88,54 @@ module.exports = {
   // Source: https://www.gov.uk/guidance/use-making-tax-digital-for-income-tax
   mtd_itsa: {
     mandatory_from: '2026-04-06',
-    income_threshold: 50000,  // £50,000 — mandatory for income over this from April 2026
-    note: 'Quarterly digital submissions required. Threshold drops to £30,000 from April 2027.',
+    phases: {
+      phase_1: { from: '2026-04-06', income_threshold: 50000 },  // £50,000+
+      phase_2: { from: '2027-04-06', income_threshold: 30000 },  // £30,000+
+      phase_3: { from: '2028-04-06', income_threshold: 20000 },  // £20,000+
+    },
+    soft_landing_2026_27: true,  // No penalty points for late quarterly updates in first year
+    quarterly_deadlines_2026_27: {
+      q1: { period: '2026-04-06 to 2026-07-05', due: '2026-08-07' },
+      q2: { period: '2026-07-06 to 2026-10-05', due: '2026-11-07' },
+      q3: { period: '2026-10-06 to 2027-01-05', due: '2027-02-07' },
+      q4: { period: '2027-01-06 to 2027-04-05', due: '2027-05-07' },
+      final_declaration: { due: '2028-01-31' },
+    },
+    note: 'Quarterly cumulative digital submissions required. Each update is year-to-date, not just the quarter.',
   },
+
+  // Mapping from app expense categories to HMRC Self Employment (MTD) expense fields
+  // Source: https://developer.service.hmrc.gov.uk/api-documentation/docs/api/service/self-employment-business-api/5.0
+  // These are the 15 HMRC periodExpenses fields for quarterly/annual submissions
+  category_to_hmrc_field: {
+    // App categories → HMRC fields
+    supplies:              'adminCosts',              // Office supplies, stationery
+    software:              'adminCosts',              // Software, tools, subscriptions
+    marketing:             'advertisingCosts',         // Advertising, promotions
+    subsistence:           'otherExpenses',            // Overnight business travel meals
+    travel:                'carVanTravelExpenses',     // Trains, flights, parking
+    mileage:               'carVanTravelExpenses',     // Business mileage
+    home_office:           'premisesRunningCosts',     // Rent, utilities for workspace
+    professional_services: 'professionalFees',         // Accountant, lawyer fees
+    training:              'otherExpenses',            // Courses, CPD
+    insurance:             'premisesRunningCosts',     // Business insurance
+
+    // Additional HMRC fields not yet covered by app categories
+    // (may be added as the app grows):
+    // costOfGoods           — goods bought for resale or materials used
+    // paymentsToSubcontractors — CIS payments to subcontractors
+    // wagesAndStaffCosts    — wages, salaries, employer NI contributions
+    // maintenanceCosts      — repairs and renewals of property/equipment
+    // businessEntertainmentCosts — NOT deductible, but reported separately
+    // interestOnBankOtherLoans   — bank/credit card/HP interest
+    // financeCharges        — bank charges, credit card fees
+    // irrecoverableDebts    — bad debts written off
+    // depreciation          — depreciation and loss/profit on asset sales
+  },
+
+  // For businesses with turnover under £90,000, HMRC allows a single
+  // 'consolidatedExpenses' figure instead of the 15-field breakdown.
+  consolidated_expenses_threshold: 90000,
 
   // Mileage allowance rates (HMRC Approved Mileage Allowance Payment)
   // Source: https://www.gov.uk/government/publications/rates-and-allowances-travel-mileage-and-fuel-allowances
