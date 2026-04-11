@@ -664,6 +664,9 @@ USER PROFILE:
 - Main clients: ${(userProfile?.main_clients || []).join(', ') || 'not specified'}
 - Works from: ${userProfile?.work_location || 'not specified'}
 - Monthly income: £${userProfile?.monthly_income || 'unknown'}
+- Has other employment (PAYE job): ${userProfile?.has_other_employment ? 'YES' : 'No'}
+${userProfile?.has_other_employment ? `- Employment income: £${userProfile?.employment_income || 'unknown'}/year` : ''}
+${userProfile?.has_other_employment ? `- Employment is PAYE: ${userProfile?.employment_is_paye ? 'Yes' : 'No'}` : ''}
 
 ${historySummary ? `CATEGORIZATION HISTORY:\n${historySummary}` : 'NO HISTORY YET - new user.'}
 
@@ -671,7 +674,13 @@ TRANSACTIONS (id | merchant | amount | date | type):
 ${chunkTxnList}
 
 EXPENSE CATEGORIES: supplies, software, marketing, subsistence, travel, mileage, home_office, professional_services, training, insurance, personal
-INCOME CATEGORIES: sponsorship_income, ad_revenue, affiliate_income, client_fees, sales_income, employment_income, other_income, personal
+INCOME CATEGORIES: sponsorship_income, ad_revenue, affiliate_income, client_fees, sales_income, paye_income, other_income, personal
+
+TRANSACTION TYPES for status field:
+- "auto_business" = business expense or self-employment income (tax deductible)
+- "auto_personal" = personal transaction (NOT tax deductible) — groceries, rent, entertainment, personal tax payments, personal transfers
+- "auto_paye" = PAYE employment income (already taxed at source, NOT self-employment)
+- "needs_review" = uncertain, needs user review
 
 RULES:
 1. HMRC "wholly and exclusively" - expenses must be purely for business
@@ -683,8 +692,28 @@ RULES:
 7. Streaming subscriptions = personal unless content creator
 8. Groceries = personal
 
+PAYE EMPLOYMENT INCOME RULES:
+9. If user has_other_employment=YES, look for regular salary payments from employers
+10. PAYE salary patterns: regular same-amount payments from Ltd/Limited companies, typically monthly, round-ish amounts (e.g. £1,500-£6,000)
+11. PAYE income → status: "auto_paye", category_id: "paye_income", category_name: "PAYE Income", business_percent: 0, tax_deductible: false
+12. PAYE income is NOT self-employment income and NOT "client_fees" — it is employment income already taxed at source
+13. Even if user is a freelancer/content creator, they may also have a day job — recognise salary payments as PAYE
+
+HMRC / TAX PAYMENT RULES:
+14. Payments TO HMRC (Self Assessment, tax payments, National Insurance) = PERSONAL, NOT tax deductible
+15. HMRC Self Assessment payments are personal income tax obligations — they are NOT business expenses
+16. Never categorise HMRC tax payments as "professional_services" or any business category
+17. HMRC payments → status: "auto_personal", category_id: "personal", category_name: "Personal (Tax Payment)", business_percent: 0, tax_deductible: false
+
+PERSONAL TRANSACTION RULES:
+18. Groceries, supermarkets, personal shopping = personal
+19. Entertainment (Netflix, Spotify, cinema, etc.) = personal (unless content creator)
+20. Rent, council tax, utilities for personal home = personal
+21. Personal insurance, gym, healthcare = personal
+22. All personal transactions → tax_deductible: false, business_percent: 0
+
 Return ONLY valid JSON array:
-[{"transaction_id":"...","status":"auto_business"|"auto_personal"|"needs_review","category_id":"...","category_name":"...","business_percent":0,"tax_deductible":false,"confidence":0.9,"explanation":"...","review_reason":null}]`;
+[{"transaction_id":"...","status":"auto_business"|"auto_personal"|"auto_paye"|"needs_review","category_id":"...","category_name":"...","business_percent":0,"tax_deductible":false,"confidence":0.9,"explanation":"...","review_reason":null}]`;
 
             console.log(`[Batch] Smart categorizing chunk ${Math.floor(i/CHUNK_SIZE) + 1}/${Math.ceil(newTransactions.length/CHUNK_SIZE)}`);
 
@@ -1529,9 +1558,9 @@ app.post('/api/categorize_from_answers', requireAuth, rateLimit(30, 60000), asyn
 - sponsorship_income: Sponsorships, brand deals, partnerships
 - ad_revenue: YouTube, TikTok, Instagram ad revenue
 - affiliate_income: Affiliate commissions, referral income
-- client_fees: Client work, consulting, freelance projects
+- client_fees: Client work, consulting, freelance projects (self-employment income)
 - sales_income: Product sales, merchandise, digital products
-- employment_income: PAYE salary from an employer (already taxed at source)
+- paye_income: PAYE salary from an employer (already taxed at source — NOT self-employment)
 - other_income: Other business income`;
 
     // INCOME CATEGORIZATION
@@ -1543,6 +1572,9 @@ USER PROFILE:
 - Business structure: ${businessStructureDesc}
 - Monthly income: £${userProfile?.monthly_income || 'unknown'}
 - Has international income: ${userProfile?.has_international_income ? 'Yes' : 'No'}
+- Has other employment (PAYE job): ${userProfile?.has_other_employment ? 'YES' : 'No'}
+${userProfile?.has_other_employment ? `- Employment income: £${userProfile?.employment_income || 'unknown'}/year` : ''}
+${userProfile?.has_other_employment ? `- Employment is PAYE: ${userProfile?.employment_is_paye ? 'Yes' : 'No'}` : ''}
 
 TRANSACTION (INCOME):
 - Payer: ${transaction.merchant_name || transaction.name}
@@ -1566,12 +1598,14 @@ HMRC TAX RULES FOR INCOME:
    - Personal transfers
    → businessPercent: 0, taxDeductible: false, categoryId: "personal"
 
-   EMPLOYMENT INCOME (PAYE salary - already taxed at source):
+   PAYE EMPLOYMENT INCOME (already taxed at source):
    - Salary/wages from an employer
    - PAYE income
    - Regular employment pay
-   → businessPercent: 100, taxDeductible: false, categoryId: "employment_income"
+   - Regular same-amount payments from Ltd/Limited companies
+   → businessPercent: 0, taxDeductible: false, categoryId: "paye_income"
    Note: This is NOT self-employment income. Tax is already deducted via PAYE.
+   Note: businessPercent is 0 because this is personal employment income, not self-employment business income.
 
    BUSINESS/SELF-EMPLOYMENT INCOME (taxable):
    - Client payments, sponsorships, platform revenue, sales
@@ -1584,7 +1618,7 @@ HMRC TAX RULES FOR INCOME:
    - Affiliate commissions → affiliate_income
    - Client work/consulting → client_fees
    - Product/merchandise sales → sales_income
-   - PAYE salary from employer → employment_income
+   - PAYE salary from employer → paye_income
    - Everything else → other_income
 
 3. **Foreign Income:**
@@ -1605,10 +1639,11 @@ DECISION PROCESS:
 3. Check for EMPLOYMENT/PAYE INCOME keywords:
    - "salary", "paye", "wages", "employer", "employment", "payroll"
    - "monthly pay", "weekly pay", "my employer", "employee"
-4. If personal keywords found → businessPercent: 0, taxDeductible: false, categoryId: "personal"
-5. If employment keywords found → businessPercent: 100, taxDeductible: false, categoryId: "employment_income"
-6. If business/self-employment income → Read Q2 (if exists) and match to business category
-7. Business income → businessPercent: 100, taxDeductible: true
+4. Also check: If user has_other_employment=YES and payment comes from a Ltd/Limited company with a regular amount, it's likely PAYE salary
+5. If personal keywords found → businessPercent: 0, taxDeductible: false, categoryId: "personal"
+6. If employment keywords found → businessPercent: 0, taxDeductible: false, categoryId: "paye_income"
+7. If business/self-employment income → Read Q2 (if exists) and match to business category
+8. Business income → businessPercent: 100, taxDeductible: true
 
 EXAMPLES:
 
@@ -1627,13 +1662,13 @@ Q1: "Personal reimbursement"
 
 EMPLOYMENT INCOME (PAYE - already taxed):
 Q1: "PAYE salary from my employer"
-→ categoryId: "employment_income", categoryName: "Employment Income", businessPercent: 100, taxDeductible: false, explanation: "PAYE salary - tax already deducted at source by your employer"
+→ categoryId: "paye_income", categoryName: "PAYE Income", businessPercent: 0, taxDeductible: false, explanation: "PAYE salary - tax already deducted at source by your employer"
 
 Q1: "Salary from employer"
-→ categoryId: "employment_income", categoryName: "Employment Income", businessPercent: 100, taxDeductible: false, explanation: "Employment salary - already taxed via PAYE"
+→ categoryId: "paye_income", categoryName: "PAYE Income", businessPercent: 0, taxDeductible: false, explanation: "Employment salary - already taxed via PAYE"
 
 Q1: "Monthly wages"
-→ categoryId: "employment_income", categoryName: "Employment Income", businessPercent: 100, taxDeductible: false, explanation: "Employment wages - tax deducted at source"
+→ categoryId: "paye_income", categoryName: "PAYE Income", businessPercent: 0, taxDeductible: false, explanation: "Employment wages - tax deducted at source"
 
 BUSINESS INCOME (taxable - self-employment):
 Q1: "YouTube/Google ad revenue" Q2: "Ad revenue (YouTube, TikTok, etc.)"
@@ -1658,10 +1693,10 @@ FOR PERSONAL INCOME (friends, gifts, reimbursements):
 - Explanation: Mention it's personal/not taxable
 
 FOR EMPLOYMENT INCOME (PAYE salary, wages):
-- businessPercent: 100
+- businessPercent: 0
 - taxDeductible: false
-- categoryId: "employment_income"
-- categoryName: "Employment Income"
+- categoryId: "paye_income"
+- categoryName: "PAYE Income"
 - Explanation: Mention it's already taxed via PAYE
 
 FOR BUSINESS/SELF-EMPLOYMENT INCOME (earned income):
@@ -1675,7 +1710,7 @@ CRITICAL VALIDATION:
 1. Did user say "friend", "paying back", "gift", "personal", "reimbursement"?
    → If YES: businessPercent: 0, taxDeductible: false, categoryId: "personal"
 2. Did user say "salary", "paye", "wages", "employer", "employment"?
-   → If YES: businessPercent: 100, taxDeductible: false, categoryId: "employment_income"
+   → If YES: businessPercent: 0, taxDeductible: false, categoryId: "paye_income"
 3. Is this earned self-employment/business income?
    → If YES: businessPercent: 100, taxDeductible: true, use business category
 
@@ -1692,9 +1727,9 @@ FOR PERSONAL INCOME:
 
 FOR EMPLOYMENT INCOME:
 {
-  "categoryId": "employment_income",
-  "categoryName": "Employment Income",
-  "businessPercent": 100,
+  "categoryId": "paye_income",
+  "categoryName": "PAYE Income",
+  "businessPercent": 0,
   "explanation": "PAYE salary - tax already deducted at source by your employer",
   "taxDeductible": false
 }
@@ -2140,23 +2175,38 @@ app.post('/api/bulk_categorize', requireAuth, rateLimit(10, 60000), async (req, 
         console.log(`  📝 Categorizing: ${transaction.merchant_name || transaction.name}`);
 
         // Build AI prompt for automatic categorization
-        const prompt = `You are a UK tax expert helping a ${workTypeDesc} categorize expenses under HMRC rules.
+        const isIncomeTxn = transaction.amount < 0;
+        const prompt = `You are a UK tax expert helping a ${workTypeDesc} categorize ${isIncomeTxn ? 'income' : 'expenses'} under HMRC rules.
 
 USER PROFILE:
 - Work type: ${workTypeDesc}
 - Monthly income: £${userProfile?.monthly_income || 'unknown'}
 - Tracking goal: ${userProfile?.tracking_goal || 'unknown'}
+- Has other employment (PAYE job): ${userProfile?.has_other_employment ? 'YES' : 'No'}
+${userProfile?.has_other_employment ? `- Employment income: £${userProfile?.employment_income || 'unknown'}/year` : ''}
+${userProfile?.has_other_employment ? `- Employment is PAYE: ${userProfile?.employment_is_paye ? 'Yes' : 'No'}` : ''}
 
 TRANSACTION TO CATEGORIZE:
 - Merchant: ${transaction.merchant_name || transaction.name}
 - Amount: £${Math.abs(transaction.amount)}
 - Date: ${transaction.date}
 - Plaid Category: ${transaction.category?.join(', ') || 'Unknown'}
+- Type: ${isIncomeTxn ? 'INCOME (money received)' : 'EXPENSE (money spent)'}
 
-AVAILABLE CATEGORIES:
+AVAILABLE EXPENSE CATEGORIES:
 ${categories}
 
-TASK: Automatically categorize this transaction based on common business use patterns.
+AVAILABLE INCOME CATEGORIES:
+- paye_income: PAYE salary from an employer (already taxed at source — NOT self-employment)
+- client_fees: Client work, consulting, freelance projects (self-employment income)
+- sponsorship_income: Sponsorships, brand deals
+- ad_revenue: Platform ad revenue
+- affiliate_income: Affiliate commissions
+- sales_income: Product/merchandise sales
+- other_income: Other business income
+- personal: Personal transfer, gift, friend paying back (not taxable)
+
+TASK: Automatically categorize this transaction based on common patterns.
 
 HMRC RULES (UK TAX YEAR ${hmrcRules.metadata.taxYear}):
 1. Business expenses must be "wholly and exclusively" for business
@@ -2173,9 +2223,29 @@ HMRC RULES (UK TAX YEAR ${hmrcRules.metadata.taxYear}):
    - Only deductible: Overnight business travel subsistence
    - This is different from US rules - UK does NOT allow 50% meal deduction
 
+4. HMRC / TAX PAYMENT RULES:
+   - Payments TO HMRC (Self Assessment, income tax, National Insurance) = PERSONAL, NOT tax deductible
+   - HMRC Self Assessment payments are personal income tax obligations — NOT business expenses
+   - Never categorise HMRC payments as "professional_services" or any business category
+   - HMRC payments → categoryId: "personal", businessPercent: 0, taxDeductible: false
+
+5. PAYE EMPLOYMENT INCOME RULES:
+   - If user has_other_employment=YES, look for regular salary payments from employers
+   - PAYE salary patterns: regular same-amount payments from Ltd/Limited companies, monthly, round amounts
+   - PAYE income → categoryId: "paye_income", businessPercent: 0, taxDeductible: false
+   - PAYE income is NOT "client_fees" — it is employment income already taxed at source
+
+6. PERSONAL TRANSACTION RULES:
+   - Groceries, supermarkets, personal shopping = personal
+   - Entertainment (Netflix, Spotify, cinema) = personal (unless content creator)
+   - Rent, council tax, utilities for personal home = personal
+   - All personal transactions → taxDeductible: false, businessPercent: 0
+
 DECISION LOGIC:
+- If INCOME and looks like regular salary from an employer (especially if has_other_employment=YES) → paye_income
+- If EXPENSE and payment to HMRC → personal (tax payment, NOT deductible)
 - If likely business-related (equipment, software, services) → Mark as business expense
-- If clearly personal (groceries, personal shopping) → Mark as personal
+- If clearly personal (groceries, personal shopping, entertainment, rent) → Mark as personal
 - If food/meals/restaurants (Pret, Starbucks, etc.) → Mark as personal (NOT tax deductible)
 - When uncertain, prefer business if it's a common expense for this work type
 
@@ -2391,6 +2461,9 @@ USER PROFILE:
 - Main clients: ${(userProfile?.main_clients || []).join(', ') || 'not specified'}
 - Works from: ${userProfile?.work_location || 'not specified'}
 - Monthly income: £${userProfile?.monthly_income || 'unknown'}
+- Has other employment (PAYE job): ${userProfile?.has_other_employment ? 'YES' : 'No'}
+${userProfile?.has_other_employment ? `- Employment income: £${userProfile?.employment_income || 'unknown'}/year` : ''}
+${userProfile?.has_other_employment ? `- Employment is PAYE: ${userProfile?.employment_is_paye ? 'Yes' : 'No'}` : ''}
 
 ${historySummary ? `CATEGORIZATION HISTORY (what this user has previously confirmed):\n${historySummary}` : 'NO CATEGORIZATION HISTORY YET - this is a new user.'}
 
@@ -2408,17 +2481,23 @@ EXPENSE CATEGORIES:
 - professional_services: Accountant, lawyer, consultant fees
 - training: Courses, books, professional development
 - insurance: Business insurance premiums
-- personal: Non-business expense (not deductible)
+- personal: Non-business expense (not deductible) — includes groceries, entertainment, rent, personal tax payments, etc.
 
 INCOME CATEGORIES:
 - sponsorship_income: Sponsorships, brand deals
 - ad_revenue: Platform ad revenue
 - affiliate_income: Affiliate commissions
-- client_fees: Client work, consulting, freelance projects
+- client_fees: Client work, consulting, freelance projects (self-employment income)
 - sales_income: Product/merchandise sales
-- employment_income: PAYE salary (already taxed)
+- paye_income: PAYE salary from an employer (already taxed at source — NOT self-employment)
 - other_income: Other business income
 - personal: Personal transfer, gift, friend paying back (not taxable)
+
+TRANSACTION TYPES for status field:
+- "auto_business" = business expense or self-employment income (tax deductible)
+- "auto_personal" = personal transaction (NOT tax deductible) — groceries, rent, entertainment, personal tax payments, personal transfers
+- "auto_paye" = PAYE employment income (already taxed at source, NOT self-employment)
+- "needs_review" = uncertain, needs user review
 
 RULES:
 1. HMRC "wholly and exclusively" rule - expenses must be purely for business
@@ -2430,8 +2509,29 @@ RULES:
 7. Subscriptions (Netflix, Spotify, Disney+) = personal unless user is a content creator reviewing content
 8. Groceries/supermarkets = personal unless strong business evidence
 
+PAYE EMPLOYMENT INCOME RULES:
+9. If user has_other_employment=YES, look for regular salary payments from employers
+10. PAYE salary patterns: regular same-amount payments from Ltd/Limited companies, typically monthly, round-ish amounts (e.g. £1,500-£6,000)
+11. PAYE income → status: "auto_paye", category_id: "paye_income", category_name: "PAYE Income", business_percent: 0, tax_deductible: false
+12. PAYE income is NOT self-employment income and NOT "client_fees" — it is employment income already taxed at source
+13. Even if user is a freelancer/content creator, they may also have a day job — recognise salary payments as PAYE
+14. If the user's main_clients list does NOT include this company and the amount matches typical salary, it's likely PAYE not client fees
+
+HMRC / TAX PAYMENT RULES:
+15. Payments TO HMRC (Self Assessment, tax payments, National Insurance) = PERSONAL, NOT tax deductible
+16. HMRC Self Assessment payments are personal income tax obligations — they are NOT business expenses
+17. Never categorise HMRC tax payments as "professional_services" or any business category
+18. HMRC payments → status: "auto_personal", category_id: "personal", category_name: "Personal (Tax Payment)", business_percent: 0, tax_deductible: false
+
+PERSONAL TRANSACTION RULES:
+19. Groceries, supermarkets, personal shopping = personal
+20. Entertainment (Netflix, Spotify, cinema, etc.) = personal (unless content creator)
+21. Rent, council tax, utilities for personal home = personal
+22. Personal insurance, gym, healthcare = personal
+23. All personal transactions → tax_deductible: false, business_percent: 0
+
 For each transaction return:
-- status: "auto_business", "auto_personal", or "needs_review"
+- status: "auto_business", "auto_personal", "auto_paye", or "needs_review"
 - category_id: from the lists above
 - category_name: human-readable name
 - business_percent: 0-100
@@ -2583,7 +2683,7 @@ app.post('/api/get_review_transactions', requireAuth, async (req, res) => {
 
     // Split by status
     const autoBusiness = uncategorized.filter(t => t.auto_status === 'auto_business');
-    const autoPersonal = uncategorized.filter(t => t.auto_status === 'auto_personal');
+    const autoPersonal = uncategorized.filter(t => t.auto_status === 'auto_personal' || t.auto_status === 'auto_paye');
     const needsReview = uncategorized.filter(t => t.auto_status === 'needs_review');
     const pending = uncategorized.filter(t => t.auto_status === 'pending' || !t.auto_status);
 
@@ -2660,7 +2760,7 @@ app.post('/api/confirm_categorization', requireAuth, async (req, res) => {
       const categoryName = isConfirm ? txn.auto_category_name : correction.category_name;
       const businessPercent = isConfirm ? txn.auto_business_percent : correction.business_percent;
       const taxDeductible = isConfirm
-        ? (txn.auto_category_id !== 'personal' && txn.auto_business_percent > 0)
+        ? (txn.auto_category_id !== 'personal' && txn.auto_category_id !== 'paye_income' && txn.auto_business_percent > 0)
         : correction.tax_deductible;
 
       // Save to categorized_transactions
@@ -2802,20 +2902,22 @@ app.post('/api/recategorize_with_feedback', requireAuth, rateLimit(20, 60000), a
 - supplies: Office supplies, materials, equipment, props for content
 - software: Business software, tools, subscriptions, apps
 - marketing: Advertising, promotions, social media ads, brand materials
-- meals: Business meals and client entertainment (50% deductible per HMRC)
+- meals: Business meals (NOT deductible in UK unless overnight business travel)
 - mileage: Business travel (45p/mile for first 10k miles, then 25p/mile)
 - home_office: Rent, utilities, internet for home workspace (requires proportional calculation)
-- professional_services: Accountant, lawyer, consultant fees
+- professional_services: Accountant, lawyer, consultant fees (NOT for HMRC tax payments)
 - training: Courses, books, professional development
 - insurance: Business insurance premiums
-- personal: Non-business expense (not deductible)`;
+- personal: Non-business expense (not deductible) — includes groceries, entertainment, rent, HMRC tax payments, personal shopping`;
 
-    const prompt = `You are a UK tax expert helping a ${workTypeDesc} categorize expenses under HMRC rules.
+    const prompt = `You are a UK tax expert helping a ${workTypeDesc} categorize transactions under HMRC rules.
 
 USER PROFILE:
 - Work type: ${workTypeDesc}
 - Monthly income: £${userProfile?.monthly_income || 'unknown'}
 - Tracking goal: ${userProfile?.tracking_goal || 'unknown'}
+- Has other employment (PAYE job): ${userProfile?.has_other_employment ? 'YES' : 'No'}
+${userProfile?.has_other_employment ? `- Employment income: £${userProfile?.employment_income || 'unknown'}/year` : ''}
 
 TRANSACTION:
 - Merchant: ${transaction.merchant_name || transaction.name}
@@ -2833,8 +2935,18 @@ USER'S FEEDBACK (what they said is wrong):
 
 YOUR TASK: Re-categorize this transaction based on the user's feedback.
 
-AVAILABLE CATEGORIES:
+AVAILABLE EXPENSE CATEGORIES:
 ${categories}
+
+AVAILABLE INCOME CATEGORIES:
+- paye_income: PAYE salary from an employer (already taxed at source)
+- client_fees: Client work, consulting, freelance projects
+- sponsorship_income: Sponsorships, brand deals
+- ad_revenue: Platform ad revenue
+- affiliate_income: Affiliate commissions
+- sales_income: Product/merchandise sales
+- other_income: Other business income
+- personal: Personal transfer, gift (not taxable)
 
 INSTRUCTIONS:
 1. Read the user's feedback carefully
@@ -2845,15 +2957,19 @@ INSTRUCTIONS:
 Common feedback patterns:
 - "This should be 100% business" → Change to businessPercent: 100, taxDeductible: true
 - "This is personal" → Change to businessPercent: 0, categoryId: "personal", taxDeductible: false
+- "This is my salary" / "PAYE" → Change to categoryId: "paye_income", businessPercent: 0, taxDeductible: false
+- "This is a tax payment" / "HMRC" → Change to categoryId: "personal", businessPercent: 0, taxDeductible: false
 - "Wrong category" → Change categoryId and categoryName to match their description
 - "Should be split" → Create a split transaction if they describe business vs personal portions
 - "Percentage is wrong" → Adjust businessPercent to match what they indicate
 
 HMRC RULES:
 1. "Wholly and exclusively" rule - if bought WITH INTENT for business = 100% deductible
-2. Business meals: Max 50% deductible
+2. Business meals: NOT deductible in UK (unless overnight business travel)
 3. Commuting to permanent workplace: NOT deductible (even if work-related)
 4. Equipment bought for business: 100% deductible even if some personal use
+5. HMRC Self Assessment / tax payments: PERSONAL, NOT tax deductible — these are personal income tax obligations
+6. PAYE salary: Not self-employment income — already taxed at source, businessPercent: 0, taxDeductible: false
 
 Be responsive to their feedback while ensuring HMRC compliance.
 
