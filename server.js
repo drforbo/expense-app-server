@@ -4455,6 +4455,8 @@ app.post('/api/hmrc/auth-url', requireAuth, async (req, res) => {
     const authUrl = `${config.authorizeUrl}?${params.toString()}`;
 
     console.log(`[HMRC] Auth URL generated for user ${userId} (${HMRC_ENV})`);
+    console.log(`[HMRC] redirect_uri: "${process.env.HMRC_REDIRECT_URI}"`);
+    console.log(`[HMRC] client_id: "${process.env.HMRC_CLIENT_ID}"`);
     res.json({ authUrl, state });
 
   } catch (error) {
