@@ -4415,6 +4415,49 @@ async function hmrcApiCall(method, path, accessToken, body = null, req = null) {
 
 /**
  * Generate HMRC authorization URL
+ * GET /api/hmrc/health — ping HMRC sandbox to keep developer account active
+ */
+app.get('/api/hmrc/health', async (req, res) => {
+  try {
+    if (!process.env.HMRC_CLIENT_ID || !process.env.HMRC_CLIENT_SECRET) {
+      return res.status(500).json({ error: 'HMRC credentials not configured' });
+    }
+
+    const config = getHmrcConfig();
+
+    // Get a server token using client_credentials grant
+    const tokenResponse = await fetch(config.tokenUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'client_credentials',
+        client_id: process.env.HMRC_CLIENT_ID,
+        client_secret: process.env.HMRC_CLIENT_SECRET,
+      }),
+    });
+
+    const tokenData = await tokenResponse.json();
+
+    if (!tokenResponse.ok) {
+      return res.json({ status: 'token_failed', hmrc_env: HMRC_ENV, error: tokenData });
+    }
+
+    // Make a simple API call — hello world
+    const helloResponse = await fetch(`${config.apiBaseUrl}/hello/world`, {
+      headers: { 'Authorization': `Bearer ${tokenData.access_token}`, 'Accept': 'application/vnd.hmrc.1.0+json' },
+    });
+
+    const helloData = await helloResponse.json();
+    console.log(`[HMRC] Health check OK (${HMRC_ENV}):`, helloData);
+    res.json({ status: 'ok', hmrc_env: HMRC_ENV, response: helloData, timestamp: new Date().toISOString() });
+
+  } catch (error) {
+    console.error('[HMRC] Health check error:', error);
+    res.status(500).json({ status: 'error', message: error.message });
+  }
+});
+
+/**
  * POST /api/hmrc/auth-url
  */
 app.post('/api/hmrc/auth-url', requireAuth, async (req, res) => {
