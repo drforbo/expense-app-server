@@ -1052,6 +1052,34 @@ app.post('/api/delete_statement', requireAuth, async (req, res) => {
   }
 });
 
+// Derive the user's categorisation stage from their confirmation history.
+// Used by the swipe screen to decide which UI mode to render.
+//   learning  (< 20 user confirmations)  → ask AI-generated questions, then explain the verdict
+//   validating (20-69)                   → show AI verdict, user confirms or free-text disagrees
+//   autopilot (70+)                      → silent auto-confirm + lightweight review
+app.post('/api/get_categorization_stage', requireAuth, async (req, res) => {
+  try {
+    const user_id = req.body.user_id || req.user?.id;
+    if (!user_id) return res.status(400).json({ error: 'user_id is required' });
+
+    const { count, error } = await supabaseAdmin
+      .from('categorization_history')
+      .select('*', { count: 'exact', head: true })
+      .eq('user_id', user_id);
+
+    if (error) throw error;
+    const confirmations = count || 0;
+    let stage = 'learning';
+    if (confirmations >= 70) stage = 'autopilot';
+    else if (confirmations >= 20) stage = 'validating';
+
+    res.json({ stage, confirmations });
+  } catch (error) {
+    console.error('Error getting categorization stage:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Get uncategorized transactions for a user
 app.post('/api/get_uncategorized_transactions', requireAuth, async (req, res) => {
   try {
@@ -2836,10 +2864,12 @@ app.post('/api/confirm_categorization', requireAuth, async (req, res) => {
           category_id: categoryId,
           category_name: categoryName,
           business_percent: businessPercent,
-          explanation: isConfirm ? txn.auto_explanation : (correction.explanation || 'User corrected'),
+          explanation: isConfirm
+            ? txn.auto_explanation
+            : (correction?.user_note || correction?.explanation || 'User corrected'),
           tax_deductible: taxDeductible,
           personal_reason: categoryId === 'personal' ? (personal_reason || null) : null,
-          user_answers: {}
+          user_answers: correction?.user_note ? { user_note: correction.user_note } : {}
         }, {
           onConflict: 'user_id,source_transaction_id'
         });
