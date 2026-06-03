@@ -712,8 +712,18 @@ PERSONAL TRANSACTION RULES:
 21. Personal insurance, gym, healthcare = personal
 22. All personal transactions → tax_deductible: false, business_percent: 0
 
+EXPLANATION + TIP FIELDS (shown to user on the swipe card):
+- "explanation": ONE plain-English sentence addressed to the user, max 90 chars, no jargon. Tells them why this classification. Examples:
+    "Adobe subscriptions are deductible if used for your editing work."
+    "Looks like a Tesco grocery shop — personal."
+    "Regular salary payment from a Ltd company — looks like PAYE income."
+- "tip_for_user": OPTIONAL educational tip personalised to this ${workTypeDesc}'s context. Max 110 chars. Set to null UNLESS the transaction is a teaching moment (first equipment purchase, first travel, first subscription, ambiguous merchant). Don't repeat the explanation. Examples:
+    "As a content creator, equipment used to film counts as business — even if you use it occasionally for fun."
+    "Subsistence is only claimable on overnight business trips, not regular meals out."
+    Return null when no genuine tip applies.
+
 Return ONLY valid JSON array:
-[{"transaction_id":"...","status":"auto_business"|"auto_personal"|"auto_paye"|"needs_review","category_id":"...","category_name":"...","business_percent":0,"tax_deductible":false,"confidence":0.9,"explanation":"...","review_reason":null}]`;
+[{"transaction_id":"...","status":"auto_business"|"auto_personal"|"auto_paye"|"needs_review","category_id":"...","category_name":"...","business_percent":0,"tax_deductible":false,"confidence":0.9,"explanation":"...","tip_for_user":"..."|null,"review_reason":null}]`;
 
             console.log(`[Batch] Smart categorizing chunk ${Math.floor(i/CHUNK_SIZE) + 1}/${Math.ceil(newTransactions.length/CHUNK_SIZE)}`);
 
@@ -745,6 +755,7 @@ Return ONLY valid JSON array:
                     auto_business_percent: result.business_percent,
                     auto_confidence: result.confidence,
                     auto_explanation: result.explanation,
+                    auto_tip_for_user: result.tip_for_user || null,
                     auto_review_reason: result.review_reason
                   })
                   .eq('id', result.transaction_id)
@@ -752,6 +763,46 @@ Return ONLY valid JSON array:
 
                 if (result.status === 'needs_review') reviewCount++;
                 else autoCount++;
+              }
+
+              // Stage 3 (minimal): auto-confirm high-confidence classifications so the
+              // user never has to swipe them. Only auto_business / auto_personal qualify
+              // — auto_paye stays for review because misclassifying salary has worse
+              // downstream tax-estimate consequences than confirmation friction.
+              const txnsById = Object.fromEntries(chunk.map(t => [t.id, t]));
+              const autoConfirmRows = results
+                .filter(r =>
+                  r.confidence >= 0.95 &&
+                  (r.status === 'auto_business' || r.status === 'auto_personal') &&
+                  txnsById[r.transaction_id]
+                )
+                .map(r => {
+                  const txn = txnsById[r.transaction_id];
+                  return {
+                    user_id,
+                    source_transaction_id: txn.id,
+                    source_type: 'pdf_upload',
+                    merchant_name: txn.merchant_name,
+                    amount: Math.abs(parseFloat(txn.amount)),
+                    transaction_date: txn.transaction_date,
+                    category_id: r.category_id,
+                    category_name: r.category_name,
+                    business_percent: r.business_percent,
+                    explanation: r.explanation,
+                    tax_deductible: r.category_id !== 'personal' && r.category_id !== 'paye_income' && r.business_percent > 0,
+                    user_answers: {}
+                  };
+                });
+
+              if (autoConfirmRows.length > 0) {
+                const { error: autoConfirmErr } = await supabaseAdmin
+                  .from('categorized_transactions')
+                  .upsert(autoConfirmRows, { onConflict: 'user_id,source_transaction_id' });
+                if (autoConfirmErr) {
+                  console.error('[Batch] Auto-confirm upsert error:', autoConfirmErr.message);
+                } else {
+                  console.log(`[Batch] Auto-confirmed ${autoConfirmRows.length} high-confidence transactions`);
+                }
               }
             } catch (chunkError) {
               console.error(`[Batch] Error in smart categorization chunk:`, chunkError.message);
@@ -1060,7 +1111,15 @@ app.post('/api/get_uncategorized_transactions', requireAuth, async (req, res) =>
       date: t.transaction_date,
       category: [], // No category yet
       description: t.description,
-      statement_filename: t.bank_statements?.filename || null
+      statement_filename: t.bank_statements?.filename || null,
+      // Stage 1 (Learning) context
+      auto_status: t.auto_status || null,
+      auto_category_name: t.auto_category_name || null,
+      auto_category_id: t.auto_category_id || null,
+      auto_business_percent: t.auto_business_percent ?? null,
+      auto_confidence: t.auto_confidence ?? null,
+      auto_explanation: t.auto_explanation || null,
+      auto_tip_for_user: t.auto_tip_for_user || null
     }));
 
     console.log(`✅ Returning ${transactions.length} uncategorized transactions`);
@@ -2735,9 +2794,10 @@ app.post('/api/get_review_transactions', requireAuth, async (req, res) => {
 app.post('/api/confirm_categorization', requireAuth, async (req, res) => {
   try {
     const user_id = req.body.user_id || req.user?.id;
-    const { transaction_ids, action, correction } = req.body;
+    const { transaction_ids, action, correction, personal_reason } = req.body;
     // action: 'confirm' or 'correct'
     // correction: { category_id, category_name, business_percent, tax_deductible } (only for 'correct')
+    // personal_reason: optional user-provided reason when correcting to personal (Stage 1 learning loop)
 
     if (!transaction_ids || !Array.isArray(transaction_ids) || !action) {
       return res.status(400).json({ error: 'Missing transaction_ids or action' });
@@ -2778,6 +2838,7 @@ app.post('/api/confirm_categorization', requireAuth, async (req, res) => {
           business_percent: businessPercent,
           explanation: isConfirm ? txn.auto_explanation : (correction.explanation || 'User corrected'),
           tax_deductible: taxDeductible,
+          personal_reason: categoryId === 'personal' ? (personal_reason || null) : null,
           user_answers: {}
         }, {
           onConflict: 'user_id,source_transaction_id'
